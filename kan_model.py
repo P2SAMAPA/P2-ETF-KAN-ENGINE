@@ -3,46 +3,46 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-class FourierKANLayer(nn.Module):
+class ReLUKANLayer(nn.Module):
     """
-    KAN layer using Fourier basis (sin/cos) – matches training.
+    ReLU-KAN: using ReLU as base activation and learnable piecewise linear functions.
+    More stable than Fourier and better for noisy financial data.
     """
-    def __init__(self, in_features, out_features, num_frequencies=10, scale=0.1):
+    def __init__(self, in_features, out_features, grid_size=20, scale=0.1):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.num_frequencies = num_frequencies
+        self.grid_size = grid_size
         
         self.base_weight = nn.Parameter(torch.Tensor(out_features, in_features))
-        self.fourier_coeff = nn.Parameter(torch.Tensor(out_features, in_features, num_frequencies * 2))
-        freqs = torch.arange(1, num_frequencies + 1, dtype=torch.float32)
-        self.register_buffer("freqs", freqs)
+        self.spline_weight = nn.Parameter(torch.Tensor(out_features, in_features, grid_size))
+        # Fixed grid points between -1 and 1
+        grid = torch.linspace(-1, 1, steps=grid_size)
+        self.register_buffer("grid", grid)
         self.scale = scale
         self.reset_parameters()
     
     def reset_parameters(self):
         nn.init.kaiming_uniform_(self.base_weight, a=math.sqrt(5))
-        nn.init.normal_(self.fourier_coeff, mean=0.0, std=0.1)
+        nn.init.normal_(self.spline_weight, mean=0.0, std=0.1)
     
     def forward(self, x):
+        # Base linear
         base_out = F.linear(x, self.base_weight)
-        x_scaled = x * math.pi
-        x_exp = x_scaled.unsqueeze(-1)
-        freqs_exp = self.freqs.unsqueeze(0).unsqueeze(0)
-        angles = x_exp * freqs_exp
-        sin_vals = torch.sin(angles)
-        cos_vals = torch.cos(angles)
-        fourier_basis = torch.cat([sin_vals, cos_vals], dim=-1)
-        fourier_out = torch.einsum('o i f, b i f -> b o', self.fourier_coeff, fourier_basis)
-        return base_out + self.scale * fourier_out
+        # Spline: ReLU(x - knot) for all knots
+        x_exp = x.unsqueeze(-1)  # (batch, in, 1)
+        knots_exp = self.grid.unsqueeze(0).unsqueeze(0)  # (1, 1, G)
+        relu = F.relu(x_exp - knots_exp)  # (batch, in, G)
+        spline_out = torch.einsum('o i g, b i g -> b o', self.spline_weight, relu)
+        return base_out + self.scale * spline_out
 
 class TemporalKANForecaster(nn.Module):
-    def __init__(self, input_dim, hidden_dims, output_dim, num_frequencies=30):
+    def __init__(self, input_dim, hidden_dims, output_dim, grid_size=20):
         super().__init__()
         layers = []
         prev = input_dim
         for h in hidden_dims:
-            layers.append(FourierKANLayer(prev, h, num_frequencies))
+            layers.append(ReLUKANLayer(prev, h, grid_size))
             layers.append(nn.LayerNorm(h))
             layers.append(nn.Dropout(0.1))
             prev = h
