@@ -26,14 +26,17 @@ jobs:
           done
         done
     
-    - name: Upload all shrinking models to HF (single commit)
+    - name: Upload all shrinking models to HF (single commit with retry)
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: python upload_all_shrinking.py
+      continue-on-error: true   # Don't fail the workflow if upload fails (artifacts still saved)
     
     - name: Upload artifacts to GitHub (backup)
       uses: actions/upload-artifact@v4
       with:
         name: shrinking-models
-        path: models/
+        path: |
+          models/
+          metrics_*.pkl
         retention-days: 7
