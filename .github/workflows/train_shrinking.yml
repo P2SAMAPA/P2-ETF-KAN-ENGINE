@@ -1,0 +1,29 @@
+name: Train Shrinking Windows (2008–2024 start years)
+
+on:
+  workflow_dispatch:  # manual trigger only (due to long compute)
+  # schedule:         # optionally add cron, but user said daily for now; we keep manual
+
+jobs:
+  train-shrinking:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: ['fi', 'equity']
+        start_year: [2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+    - name: Train shrinking window start ${{ matrix.start_year }} for ${{ matrix.module }}
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: python train.py --mode shrinking --module ${{ matrix.module }} --start-year ${{ matrix.start_year }} --epochs 150
+    - name: Upload window results
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: python upload_model.py --module ${{ matrix.module }} --mode shrinking --start-year ${{ matrix.start_year }}
