@@ -6,7 +6,6 @@ import math
 class ReLUKANLayer(nn.Module):
     """
     ReLU-KAN: using ReLU as base activation and learnable piecewise linear functions.
-    More stable than Fourier and better for noisy financial data.
     """
     def __init__(self, in_features, out_features, grid_size=20, scale=0.1):
         super().__init__()
@@ -16,7 +15,6 @@ class ReLUKANLayer(nn.Module):
         
         self.base_weight = nn.Parameter(torch.Tensor(out_features, in_features))
         self.spline_weight = nn.Parameter(torch.Tensor(out_features, in_features, grid_size))
-        # Fixed grid points between -1 and 1
         grid = torch.linspace(-1, 1, steps=grid_size)
         self.register_buffer("grid", grid)
         self.scale = scale
@@ -27,12 +25,10 @@ class ReLUKANLayer(nn.Module):
         nn.init.normal_(self.spline_weight, mean=0.0, std=0.1)
     
     def forward(self, x):
-        # Base linear
         base_out = F.linear(x, self.base_weight)
-        # Spline: ReLU(x - knot) for all knots
-        x_exp = x.unsqueeze(-1)  # (batch, in, 1)
-        knots_exp = self.grid.unsqueeze(0).unsqueeze(0)  # (1, 1, G)
-        relu = F.relu(x_exp - knots_exp)  # (batch, in, G)
+        x_exp = x.unsqueeze(-1)
+        knots_exp = self.grid.unsqueeze(0).unsqueeze(0)
+        relu = F.relu(x_exp - knots_exp)
         spline_out = torch.einsum('o i g, b i g -> b o', self.spline_weight, relu)
         return base_out + self.scale * spline_out
 
