@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 from datasets import load_dataset
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -56,7 +57,8 @@ def prepare_module_data(df, module='fi', seq_len=20):
         y_seq.append(y_scaled[i+seq_len])
     return np.array(X_seq), np.array(y_seq), scaler_X, scaler_y, features.columns.tolist(), assets
 
-def train_full(module, epochs=150, seq_len=20, lr=1e-3):
+def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3):
+    print("Loading data...")
     df = load_raw_data()
     X, y, scaler_X, scaler_y, feat_names, target_names = prepare_module_data(df, module, seq_len)
     n = len(X)
@@ -65,32 +67,53 @@ def train_full(module, epochs=150, seq_len=20, lr=1e-3):
     X_train, y_train = X[:train_end], y[:train_end]
     X_val, y_val = X[train_end:val_end], y[train_end:val_end]
     X_test, y_test = X[val_end:], y[val_end:]
+    
     X_train_t = torch.FloatTensor(X_train)
     y_train_t = torch.FloatTensor(y_train)
     X_val_t = torch.FloatTensor(X_val)
     y_val_t = torch.FloatTensor(y_val)
+    
+    train_dataset = TensorDataset(X_train_t, y_train_t)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    
     input_dim = seq_len * X.shape[2]
     model = TemporalKANForecaster(input_dim, hidden_dims=[64,32], output_dim=len(target_names))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
+    
     best_val_loss = float('inf')
-    for epoch in tqdm(range(epochs)):
+    print(f"Starting training for {module} module...")
+    for epoch in range(epochs):
         model.train()
-        optimizer.zero_grad()
-        pred = model(X_train_t)
-        loss = loss_fn(pred, y_train_t)
-        loss.backward()
-        optimizer.step()
+        total_loss = 0.0
+        for batch_X, batch_y in train_loader:
+            optimizer.zero_grad()
+            pred = model(batch_X)
+            loss = loss_fn(pred, batch_y)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        avg_train_loss = total_loss / len(train_loader)
+        
         model.eval()
         with torch.no_grad():
-            val_loss = loss_fn(model(X_val_t), y_val_t)
+            val_loss = loss_fn(model(X_val_t), y_val_t).item()
+        
+        if (epoch+1) % 10 == 0:
+            print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f}")
+        
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             os.makedirs('models', exist_ok=True)
             torch.save(model.state_dict(), f"models/kan_{module}_full.pt")
+            print(f"  -> New best model saved (val_loss={val_loss:.6f})")
+    
+    # Save scalers
     os.makedirs('models', exist_ok=True)
     joblib.dump(scaler_X, f'models/scaler_X_{module}_full.pkl')
     joblib.dump(scaler_y, f'models/scaler_y_{module}_full.pkl')
+    
+    # Final test evaluation
     model.eval()
     with torch.no_grad():
         test_pred = model(torch.FloatTensor(X_test)).numpy()
@@ -102,11 +125,11 @@ def train_full(module, epochs=150, seq_len=20, lr=1e-3):
         'target_names': target_names,
         'best_val_loss': float(best_val_loss)
     }
-    # Save metrics using joblib (avoids JSON serialization issues)
     joblib.dump(results, f'metrics_{module}_full.pkl')
-    print(f"Full model for {module} done. Test predictions saved.")
+    print(f"Full model for {module} done. Best val loss: {best_val_loss:.6f}")
 
-def train_shrinking(module, start_year, epochs=150, seq_len=20):
+def train_shrinking(module, start_year, epochs=150, seq_len=20, batch_size=64, lr=1e-3):
+    print(f"Shrinking window start={start_year} for {module}...")
     df = load_raw_data()
     current_year = pd.Timestamp.now().year
     df = df[df.index >= f'{start_year}-01-01']
@@ -114,41 +137,59 @@ def train_shrinking(module, start_year, epochs=150, seq_len=20):
     X, y, scaler_X, scaler_y, feat_names, target_names = prepare_module_data(df, module, seq_len)
     n = len(X)
     if n < 100:
-        print(f"Window start={start_year} has only {n} samples, skipping.")
+        print(f"  -> Not enough samples ({n}), skipping.")
         return
     train_end = int(0.8 * n)
     val_end = int(0.9 * n)
     X_train, y_train = X[:train_end], y[:train_end]
     X_val, y_val = X[train_end:val_end], y[train_end:val_end]
     X_test, y_test = X[val_end:], y[val_end:]
+    
     X_train_t = torch.FloatTensor(X_train)
     y_train_t = torch.FloatTensor(y_train)
     X_val_t = torch.FloatTensor(X_val)
     y_val_t = torch.FloatTensor(y_val)
-    X_test_t = torch.FloatTensor(X_test)
+    
+    train_dataset = TensorDataset(X_train_t, y_train_t)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    
     input_dim = seq_len * X.shape[2]
     model = TemporalKANForecaster(input_dim, hidden_dims=[64,32], output_dim=len(target_names))
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
+    
     best_val_loss = float('inf')
-    for epoch in tqdm(range(epochs)):
+    for epoch in range(epochs):
         model.train()
-        optimizer.zero_grad()
-        loss = loss_fn(model(X_train_t), y_train_t)
-        loss.backward()
-        optimizer.step()
+        total_loss = 0.0
+        for batch_X, batch_y in train_loader:
+            optimizer.zero_grad()
+            pred = model(batch_X)
+            loss = loss_fn(pred, batch_y)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        avg_train_loss = total_loss / len(train_loader)
+        
         model.eval()
-        val_loss = loss_fn(model(X_val_t), y_val_t)
+        with torch.no_grad():
+            val_loss = loss_fn(model(X_val_t), y_val_t).item()
+        
+        if (epoch+1) % 20 == 0:
+            print(f"  Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f}")
+        
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             os.makedirs('models', exist_ok=True)
             torch.save(model.state_dict(), f"models/kan_{module}_shrinking_start{start_year}.pt")
+    
     os.makedirs('models', exist_ok=True)
     joblib.dump(scaler_X, f'models/scaler_X_{module}_shrinking_start{start_year}.pkl')
     joblib.dump(scaler_y, f'models/scaler_y_{module}_shrinking_start{start_year}.pkl')
+    
     model.eval()
     with torch.no_grad():
-        test_pred = model(X_test_t).numpy()
+        test_pred = model(torch.FloatTensor(X_test)).numpy()
     test_true = y_test
     results = {
         'start_year': start_year,
@@ -159,18 +200,20 @@ def train_shrinking(module, start_year, epochs=150, seq_len=20):
         'best_val_loss': float(best_val_loss)
     }
     joblib.dump(results, f'metrics_{module}_shrinking_start{start_year}.pkl')
-    print(f"Shrinking window start={start_year}, module={module} done.")
+    print(f"  -> Done. Best val loss: {best_val_loss:.6f}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['full', 'shrinking'], required=True)
     parser.add_argument('--module', choices=['fi', 'equity'], required=True)
     parser.add_argument('--epochs', type=int, default=150)
+    parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--start-year', type=int, help='only for shrinking mode')
     args = parser.parse_args()
+    
     if args.mode == 'full':
-        train_full(args.module, epochs=args.epochs)
+        train_full(args.module, epochs=args.epochs, batch_size=args.batch_size)
     else:
         if not args.start_year:
             raise ValueError("--start-year required for shrinking mode")
-        train_shrinking(args.module, args.start_year, epochs=args.epochs)
+        train_shrinking(args.module, args.start_year, epochs=args.epochs, batch_size=args.batch_size)
