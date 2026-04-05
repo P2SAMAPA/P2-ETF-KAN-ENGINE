@@ -1,8 +1,8 @@
 import os
-import json
 import argparse
 from huggingface_hub import HfApi, Repository
 import joblib
+import shutil
 
 def upload_model(module, mode, start_year=None):
     token = os.environ.get('HF_TOKEN')
@@ -19,33 +19,24 @@ def upload_model(module, mode, start_year=None):
     local_dir = "hf_cache_results"
     repo = Repository(local_dir=local_dir, clone_from=repo_name, use_auth_token=token)
     
-    # Copy model and scalers
     if mode == 'full':
         model_file = f"models/kan_{module}_full.pt"
         scaler_x = f"models/scaler_X_{module}_full.pkl"
         scaler_y = f"models/scaler_y_{module}_full.pkl"
-        metrics_file = f"metrics_{module}_full.json"
+        metrics_file = f"metrics_{module}_full.pkl"
     else:
         model_file = f"models/kan_{module}_shrinking_start{start_year}.pt"
         scaler_x = f"models/scaler_X_{module}_shrinking_start{start_year}.pkl"
         scaler_y = f"models/scaler_y_{module}_shrinking_start{start_year}.pkl"
-        metrics_file = f"metrics_{module}_shrinking_start{start_year}.json"
+        metrics_file = f"metrics_{module}_shrinking_start{start_year}.pkl"
     
-    import shutil
     for f in [model_file, scaler_x, scaler_y, metrics_file]:
         if os.path.exists(f):
             shutil.copy(f, local_dir)
     
-    # Optionally compute consensus metrics from test predictions
-    with open(metrics_file, 'r') as fp:
-        data = json.load(fp)
-    # Add metadata
-    data['module'] = module
-    data['mode'] = mode
-    if start_year:
-        data['start_year'] = start_year
-    with open(os.path.join(local_dir, os.path.basename(metrics_file)), 'w') as fp:
-        json.dump(data, fp)
+    # Also copy a metadata text file for clarity
+    with open(os.path.join(local_dir, "upload_info.txt"), "a") as fp:
+        fp.write(f"{module} {mode} {'start_'+str(start_year) if start_year else ''}\n")
     
     repo.push_to_commit(commit_message=f"Upload {module} {mode} model")
     print(f"Uploaded {module} {mode} model to {repo_name}")
