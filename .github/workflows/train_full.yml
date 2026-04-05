@@ -6,14 +6,11 @@ on:
     paths:
       - '*.py'
       - 'requirements.txt'
-  workflow_dispatch:  # still manual trigger but no parameters
+  workflow_dispatch:
 
 jobs:
   train-full:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        module: ['fi', 'equity']
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python 3.10
@@ -27,11 +24,17 @@ jobs:
         key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
     - name: Install dependencies
       run: pip install -r requirements.txt
-    - name: Train ${{ matrix.module }} module (full dataset)
+    - name: Train FI module
+      run: python train.py --mode full --module fi --epochs 150
+    - name: Train Equity module
+      run: python train.py --mode full --module equity --epochs 150
+    - name: Upload all models to HF (single commit)
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: python train.py --mode full --module ${{ matrix.module }} --epochs 150
-    - name: Upload model to HF dataset
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: python upload_model.py --module ${{ matrix.module }} --mode full
+      run: python upload_all_models.py
+    - name: Upload artifacts to GitHub (backup)
+      uses: actions/upload-artifact@v4
+      with:
+        name: trained-models
+        path: models/
+        retention-days: 7
