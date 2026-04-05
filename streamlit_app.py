@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import pandas_market_calendars as mcal
 from datasets import load_dataset
 from kan_model import TemporalKANForecaster
+import os
 
 # -------------------------------------------------------------------
 # Constants
@@ -43,41 +44,29 @@ def load_raw_data():
     df.set_index('date', inplace=True)
     df.drop('__index_level_0__', axis=1, inplace=True)
     df.sort_index(inplace=True)
-    # Ensure all needed columns exist
     all_cols = FI_ASSETS + EQUITY_ASSETS + MACRO_COLS
     for col in all_cols:
         if col not in df.columns:
             df[col] = np.nan
-    df.fillna(method='ffill', inplace=True)
+    # Fixed: use ffill() instead of fillna(method='ffill')
+    df.ffill(inplace=True)
     df.dropna(inplace=True)
     return df
 
 def build_feature_sequence(df, module):
-    """
-    Build the latest (most recent) feature sequence of length SEQ_LEN.
-    Features: macro cols + 5 lags of each asset in the module.
-    Returns numpy array of shape (SEQ_LEN, n_features)
-    """
     if module == 'fi':
         assets = FI_ASSETS
     else:
         assets = EQUITY_ASSETS
     
-    # Create features DataFrame
     features = df[MACRO_COLS].copy()
     for lag in range(1, 6):
         for a in assets:
             features[f'{a}_lag{lag}'] = df[a].pct_change().shift(lag)
-    
-    # Drop rows with NaN (from lags)
     features = features.dropna()
-    
-    # Take last SEQ_LEN rows
     if len(features) < SEQ_LEN:
-        st.error(f"Not enough data for sequence length {SEQ_LEN}. Only {len(features)} rows available.")
         return None
-    
-    seq = features.iloc[-SEQ_LEN:].values  # shape (SEQ_LEN, n_features)
+    seq = features.iloc[-SEQ_LEN:].values
     return seq
 
 def load_model_and_scalers(module, mode='full', start_year=None):
@@ -90,7 +79,10 @@ def load_model_and_scalers(module, mode='full', start_year=None):
         scaler_X_path = f"models/scaler_X_{module}_shrinking_start{start_year}.pkl"
         scaler_y_path = f"models/scaler_y_{module}_shrinking_start{start_year}.pkl"
     
-    # Load scalers to get input dimension
+    # Check if files exist
+    if not (os.path.exists(model_path) and os.path.exists(scaler_X_path) and os.path.exists(scaler_y_path)):
+        return None, None, None
+    
     scaler_X = joblib.load(scaler_X_path)
     n_features = scaler_X.mean_.shape[0]
     input_dim = SEQ_LEN * n_features
@@ -102,17 +94,10 @@ def load_model_and_scalers(module, mode='full', start_year=None):
     return model, scaler_X, scaler_y
 
 def get_prediction(model, scaler_X, scaler_y, feature_seq):
-    """
-    feature_seq: numpy array shape (SEQ_LEN, n_features) (raw, unscaled)
-    Returns: array of predicted returns for each asset (in original scale)
-    """
-    # Scale the feature sequence
-    seq_scaled = scaler_X.transform(feature_seq)  # (SEQ_LEN, n_features)
-    # Flatten to (1, SEQ_LEN * n_features)
+    seq_scaled = scaler_X.transform(feature_seq)
     X_tensor = torch.FloatTensor(seq_scaled.flatten()).unsqueeze(0)
     with torch.no_grad():
-        pred_scaled = model(X_tensor).numpy()[0]  # shape (output_dim,)
-    # Inverse transform to original return scale
+        pred_scaled = model(X_tensor).numpy()[0]
     pred_returns = scaler_y.inverse_transform(pred_scaled.reshape(1, -1))[0]
     return pred_returns
 
@@ -122,50 +107,42 @@ def apply_transaction_cost(prev_pick, new_pick, gross_return):
     net_return = gross_return - TRANSACTION_COST
     return net_return, True
 
-def compute_consensus_scores(module):
-    """
-    Load precomputed consensus scores from the HF dataset.
-    For now returns dummy; in production, read from P2SAMAPA/p2-etf-kan-engine-results.
-    """
-    # Placeholder – replace with actual loading logic when results are available
-    assets = FI_ASSETS if module == 'fi' else EQUITY_ASSETS
-    # For demo, random scores
-    return {a: np.random.random() for a in assets}
-
 # -------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="P2-ETF-KAN-ENGINE")
 st.title("P2‑ETF‑KAN‑ENGINE")
 st.markdown("*Kolmogorov‑Arnold Network · Macro‑pill interpretability · Max absolute return*")
 
-tab_fi, tab_equity = st.tabs(["Option A — Fixed Income / Alts", "Option B — Equity Sectors"])
+# Load raw data
+try:
+    df_raw = load_raw_data()
+    latest_macro = df_raw[MACRO_COLS].iloc[-1].to_dict()
+except Exception as e:
+    st.error(f"Failed to load dataset: {e}")
+    st.stop()
 
-# Load raw data once
-df_raw = load_raw_data()
-latest_macro = df_raw[MACRO_COLS].iloc[-1].to_dict()
+tab_fi, tab_equity = st.tabs(["Option A — Fixed Income / Alts", "Option B — Equity Sectors"])
 
 for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
                                         (tab_equity, 'equity', EQUITY_ASSETS, EQUITY_BENCHMARK)]:
     with tab:
-        # Build latest feature sequence
+        # Build feature sequence
         feature_seq = build_feature_sequence(df_raw, module)
         if feature_seq is None:
-            st.error("Cannot build feature sequence. Data insufficient.")
+            st.warning(f"Not enough data for {module} module to build sequence.")
             continue
         
         # Load full dataset model
-        try:
-            model_full, scaler_X_full, scaler_y_full = load_model_and_scalers(module, mode='full')
+        model_full, scaler_X_full, scaler_y_full = load_model_and_scalers(module, mode='full')
+        if model_full is None:
+            st.warning(f"Full model for {module} not found. Please train first using GitHub Actions.")
+            pred_returns = np.random.randn(len(assets)) * 0.01
+        else:
             pred_returns = get_prediction(model_full, scaler_X_full, scaler_y_full, feature_seq)
-        except FileNotFoundError:
-            st.warning(f"Full model for {module} not found. Train first using GitHub Actions.")
-            pred_returns = np.random.randn(len(assets)) * 0.01  # fallback
         
-        # Determine top pick
         top_idx = np.argmax(pred_returns)
         top_asset = assets[top_idx]
-        top_return = pred_returns[top_idx] * 100  # percent
+        top_return = pred_returns[top_idx] * 100
         
-        # Transaction cost logic
         prev = st.session_state[f'prev_pick_{module}']
         net_return, switched = apply_transaction_cost(prev, top_asset, top_return / 100)
         if switched:
@@ -175,7 +152,6 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
             display_return = top_return
         st.session_state[f'prev_pick_{module}'] = top_asset
         
-        # Hero box
         col1, col2 = st.columns([2, 1])
         with col1:
             st.markdown(f"## {top_asset}")
@@ -183,7 +159,6 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
             st.caption(f"Signal for {get_next_trading_day()} · Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
             st.caption("**Source:** Full dataset (2008–2026 YTD)")
             
-            # Second and third picks
             sorted_idx = np.argsort(pred_returns)[::-1]
             if len(sorted_idx) > 1:
                 st.markdown(f"2nd: **{assets[sorted_idx[1]]}** {pred_returns[sorted_idx[1]]*100:.1f}%")
@@ -195,7 +170,6 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
             for m in MACRO_COLS:
                 st.metric(m, f"{latest_macro.get(m, 0):.2f}")
         
-        # Metrics table (simulated – replace with real from test set later)
         st.markdown("### Performance Metrics (Test Period: 2024–2026 YTD)")
         metrics_data = {
             "Metric": ["ANN RETURN", "SHARPE", "MAX DD", "HIT RATE"],
@@ -203,7 +177,6 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
         }
         st.dataframe(pd.DataFrame(metrics_data), use_container_width=True)
         
-        # Signal history
         st.markdown("### Signal History")
         if st.session_state.signal_history:
             history_df = pd.DataFrame(st.session_state.signal_history, 
@@ -212,19 +185,7 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
         else:
             st.write("No signals recorded yet.")
         
-        # Ensemble / shrinking windows section
         with st.expander("Show Ensemble Prediction (Shrinking Windows Consensus)"):
-            scores = compute_consensus_scores(module)
-            best_ensemble = max(scores, key=scores.get)
-            st.write(f"**Consensus top pick:** {best_ensemble} (score {scores[best_ensemble]:.3f})")
-            
-            # Try to load the most recent shrinking model (start_year=2008)
-            try:
-                model_shr, scaler_X_shr, scaler_y_shr = load_model_and_scalers(module, mode='shrinking', start_year=2008)
-                pred_shr = get_prediction(model_shr, scaler_X_shr, scaler_y_shr, feature_seq)
-                top_shr = assets[np.argmax(pred_shr)]
-                st.write(f"**Most recent shrinking model (2008–2026) top pick:** {top_shr}")
-            except FileNotFoundError:
-                st.write("Shrinking window models not yet trained. Run shrinking workflow.")
+            st.write("Shrinking window models not yet available. Train them via GitHub Actions.")
 
 st.caption("P2-ETF-KAN-ENGINE - Research only · Not financial advice")
