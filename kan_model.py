@@ -8,8 +8,7 @@ class KANLayer(nn.Module):
     KAN layer using linear spline with ReLU basis functions.
     For each input feature j and output neuron i:
         output_i = sum_j ( w_base_ij * x_j + sum_{k=1}^{G} w_spline_ijk * max(0, x_j - knot_k) )
-    where knots are fixed (e.g., evenly spaced between -1 and 1).
-    This is efficient, stable, and standard for KAN approximations.
+    where knots are fixed (evenly spaced between -1 and 1).
     """
     def __init__(self, in_features, out_features, grid_size=5, scale_spline=0.1):
         super().__init__()
@@ -17,17 +16,13 @@ class KANLayer(nn.Module):
         self.out_features = out_features
         self.grid_size = grid_size
         
-        # Base linear weights (bias is incorporated in the spline part via zero knot?)
+        # Base linear weights
         self.base_weight = nn.Parameter(torch.Tensor(out_features, in_features))
         
         # Spline weights: (out_features, in_features, grid_size)
         self.spline_weight = nn.Parameter(torch.Tensor(out_features, in_features, grid_size))
         
-        # Fixed knots: grid_size points between -1 and 1 (excluding -1? we can include)
-        # We'll use grid_size knots, e.g., -1 + 2*k/(G+1) to avoid boundaries?
-        # Better: use interior knots, but ReLU will handle.
-        knots = torch.linspace(-1, 1, steps=grid_size+2)[1:-1]  # exclude -1 and 1? actually include
-        # But we want knots within [-1,1]. Let's use evenly spaced.
+        # Fixed knots: evenly spaced between -1 and 1
         knots = torch.linspace(-1, 1, steps=grid_size)
         self.register_buffer("knots", knots)  # (grid_size,)
         
@@ -43,8 +38,7 @@ class KANLayer(nn.Module):
         x: (batch, in_features)
         returns: (batch, out_features)
         """
-        batch = x.shape[0]
-        # Base linear: (batch, out)
+        # Base linear
         base_out = F.linear(x, self.base_weight)  # (batch, out)
         
         # Spline part: for each input feature, compute ReLU(x - knot) for all knots
@@ -56,7 +50,7 @@ class KANLayer(nn.Module):
         # Spline contribution: sum over knots and input features
         # spline_weight: (out, in, grid_size)
         # relu: (batch, in, grid_size)
-        # We want (batch, out) = sum_{in, grid} spline_weight[out, in, grid] * relu[batch, in, grid]
+        # Output: (batch, out) = sum_{in, grid} spline_weight[out, in, grid] * relu[batch, in, grid]
         spline_out = torch.einsum('o i g, b i g -> b o', self.spline_weight, relu)
         
         return base_out + self.scale_spline * spline_out
