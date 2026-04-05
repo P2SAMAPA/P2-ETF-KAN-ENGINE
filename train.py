@@ -48,7 +48,7 @@ def create_features_and_targets(df, assets, seq_len=20):
         y_seq.append(y[i+seq_len])
     return np.array(X_seq), np.array(y_seq), features.columns.tolist(), assets
 
-def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=20):
+def train_full(module, epochs=300, seq_len=20, batch_size=128, lr=5e-4, patience=50):
     print("Loading raw data...")
     df = load_raw_data()
     assets = FI_ASSETS if module == 'fi' else EQUITY_ASSETS
@@ -108,9 +108,10 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     
     input_dim = seq_len * X_train_scaled.shape[-1]
-    model = TemporalKANForecaster(input_dim, hidden_dims=[64,32], output_dim=len(assets))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    # Tuned KAN: deeper, more knots
+    model = TemporalKANForecaster(input_dim, hidden_dims=[128, 64, 32], output_dim=len(assets), grid_size=12)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0)  # no weight decay
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     loss_fn = nn.MSELoss()
     
     best_val_loss = float('inf')
@@ -145,9 +146,9 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
             pred_sample = model(X_val_t[:32])
             pred_var = pred_sample.var().item()
         
-        scheduler.step(val_loss)
+        scheduler.step()
         
-        if (epoch+1) % 10 == 0:
+        if (epoch+1) % 20 == 0:
             print(f"Epoch {epoch+1:3d}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f} | Grad Norm: {grad_norm:.6f} | Pred Var: {pred_var:.6f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
         
         # Early stopping
@@ -157,7 +158,7 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
             epochs_no_improve = 0
             os.makedirs('models', exist_ok=True)
             torch.save(model.state_dict(), f"models/kan_{module}_full.pt")
-            if (epoch+1) % 10 == 0:
+            if (epoch+1) % 20 == 0:
                 print(f"  -> New best model (val_loss={val_loss:.6f})")
         else:
             epochs_no_improve += 1
@@ -190,7 +191,7 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
     print(f"Full model for {module} done. Best val loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
     print(f"Test prediction mean: {test_pred.mean():.6f}, std: {test_pred.std():.6f}")
 
-def train_shrinking(module, start_year, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=20):
+def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=128, lr=5e-4, patience=50):
     print(f"Shrinking window start={start_year} for {module}...")
     df = load_raw_data()
     current_year = pd.Timestamp.now().year
@@ -205,7 +206,6 @@ def train_shrinking(module, start_year, epochs=150, seq_len=20, batch_size=64, l
         return
     
     print(f"  Total samples: {n}")
-    # Data sanity check
     if np.isnan(y).any():
         print("  NaN in targets, skipping")
         return
@@ -246,9 +246,9 @@ def train_shrinking(module, start_year, epochs=150, seq_len=20, batch_size=64, l
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     
     input_dim = seq_len * X_train_scaled.shape[-1]
-    model = TemporalKANForecaster(input_dim, hidden_dims=[64,32], output_dim=len(assets))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    model = TemporalKANForecaster(input_dim, hidden_dims=[128, 64, 32], output_dim=len(assets), grid_size=12)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     loss_fn = nn.MSELoss()
     
     best_val_loss = float('inf')
@@ -270,7 +270,7 @@ def train_shrinking(module, start_year, epochs=150, seq_len=20, batch_size=64, l
         model.eval()
         with torch.no_grad():
             val_loss = loss_fn(model(X_val_t), y_val_t).item()
-        scheduler.step(val_loss)
+        scheduler.step()
         
         if (epoch+1) % 20 == 0:
             print(f"  Epoch {epoch+1:3d}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f}")
@@ -313,14 +313,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['full', 'shrinking'], required=True)
     parser.add_argument('--module', choices=['fi', 'equity'], required=True)
-    parser.add_argument('--epochs', type=int, default=150)
-    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--epochs', type=int, default=300)
+    parser.add_argument('--batch-size', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=5e-4)
+    parser.add_argument('--patience', type=int, default=50)
     parser.add_argument('--start-year', type=int, help='only for shrinking mode')
     args = parser.parse_args()
     
     if args.mode == 'full':
-        train_full(args.module, epochs=args.epochs, batch_size=args.batch_size)
+        train_full(args.module, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, patience=args.patience)
     else:
         if not args.start_year:
             raise ValueError("--start-year required for shrinking mode")
-        train_shrinking(args.module, args.start_year, epochs=args.epochs, batch_size=args.batch_size)
+        train_shrinking(args.module, args.start_year, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, patience=args.patience)
