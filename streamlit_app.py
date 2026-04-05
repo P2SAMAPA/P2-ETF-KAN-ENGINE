@@ -72,7 +72,6 @@ def ensure_model_file(local_path, repo_filename):
     """Download file from Hugging Face if not exists locally."""
     if not os.path.exists(local_path):
         try:
-            # Ensure models directory exists
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             hf_hub_download(
                 repo_id=HF_REPO,
@@ -107,15 +106,15 @@ def load_model_and_scalers(module, mode='full', start_year=None):
             ensure_model_file(local_scaler_y, scaler_y_file)):
         return None, None, None
     
-    # Load scalers and model
+    # Load scalers
     scaler_X = joblib.load(local_scaler_x)
     scaler_y = joblib.load(local_scaler_y)
     n_features = scaler_X.mean_.shape[0]
     input_dim = SEQ_LEN * n_features
     output_dim = len(FI_ASSETS) if module == 'fi' else len(EQUITY_ASSETS)
     
-    # Model architecture must match training (Fourier KAN, 256/128/64, 30 freqs)
-    model = TemporalKANForecaster(input_dim, hidden_dims=[256, 128, 64], output_dim=output_dim, num_frequencies=30)
+    # ReLUKAN model architecture – must match training (grid_size=20, hidden_dims=[256,128,64])
+    model = TemporalKANForecaster(input_dim, hidden_dims=[256, 128, 64], output_dim=output_dim, grid_size=20)
     model.load_state_dict(torch.load(local_model, map_location='cpu'))
     model.eval()
     return model, scaler_X, scaler_y
@@ -145,7 +144,6 @@ except Exception as e:
     st.error(f"Failed to load dataset: {e}")
     st.stop()
 
-# Create models directory if needed
 os.makedirs("models", exist_ok=True)
 
 tab_fi, tab_equity = st.tabs(["Option A — Fixed Income / Alts", "Option B — Equity Sectors"])
