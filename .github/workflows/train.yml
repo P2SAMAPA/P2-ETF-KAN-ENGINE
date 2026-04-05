@@ -1,0 +1,80 @@
+name: Train KAN Model
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '*.py'
+      - 'requirements.txt'
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'Training epochs'
+        required: false
+        default: '150'
+      window_size:
+        description: 'Rolling window size (days)'
+        required: false
+        default: '756'
+      mode:
+        description: 'full or shrinking'
+        required: false
+        default: 'full'
+
+jobs:
+  train-full:
+    if: github.event.inputs.mode == 'full' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: ['fi', 'equity']
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Cache pip
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+    - name: Train ${{ matrix.module }} module (full dataset)
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        MODULE: ${{ matrix.module }}
+        EPOCHS: ${{ github.event.inputs.epochs || 150 }}
+      run: python train.py --mode full --module $MODULE --epochs $EPOCHS
+    - name: Upload model to HF dataset
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: python upload_model.py --module ${{ matrix.module }} --mode full
+
+  train-shrinking:
+    if: github.event.inputs.mode == 'shrinking'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: ['fi', 'equity']
+        start_year: [2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+    - name: Train shrinking window (start ${{ matrix.start_year }})
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        MODULE: ${{ matrix.module }}
+        START_YEAR: ${{ matrix.start_year }}
+        EPOCHS: 150
+      run: python train.py --mode shrinking --module $MODULE --start-year $START_YEAR --epochs $EPOCHS
+    - name: Upload window results
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: python upload_model.py --module ${{ matrix.module }} --mode shrinking --start-year ${{ matrix.start_year }}
