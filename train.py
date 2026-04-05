@@ -56,15 +56,27 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
     # Create features/targets BEFORE splitting
     X, y, feat_names, target_names = create_features_and_targets(df, assets, seq_len)
     n = len(X)
-    # Chronological split indices
+    print(f"Total samples: {n}")
+    
+    # Data sanity checks
+    print(f"X shape: {X.shape}, y shape: {y.shape}")
+    print(f"y mean: {y.mean():.6f}, y std: {y.std():.6f}")
+    print(f"y min: {y.min():.6f}, y max: {y.max():.6f}")
+    if np.isnan(y).any():
+        raise ValueError("NaN values in targets")
+    if np.std(y) < 1e-6:
+        raise ValueError("Targets have near-zero variance, model cannot learn")
+    
+    # Chronological split
     train_end = int(0.8 * n)
     val_end = int(0.9 * n)
     X_train_raw, y_train_raw = X[:train_end], y[:train_end]
     X_val_raw, y_val_raw = X[train_end:val_end], y[train_end:val_end]
     X_test_raw, y_test_raw = X[val_end:], y[val_end:]
     
+    print(f"Train samples: {len(X_train_raw)}, Val samples: {len(X_val_raw)}, Test samples: {len(X_test_raw)}")
+    
     # Flatten sequences for scaling (scale each feature independently)
-    # X shape: (n_samples, seq_len, n_features) -> (n_samples*seq_len, n_features)
     train_flat = X_train_raw.reshape(-1, X_train_raw.shape[-1])
     val_flat = X_val_raw.reshape(-1, X_val_raw.shape[-1])
     test_flat = X_test_raw.reshape(-1, X_test_raw.shape[-1])
@@ -114,6 +126,14 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
             pred = model(batch_X)
             loss = loss_fn(pred, batch_y)
             loss.backward()
+            
+            # Gradient debugging (compute global norm)
+            grad_norm = 0.0
+            for p in model.parameters():
+                if p.grad is not None:
+                    grad_norm += p.grad.norm().item() ** 2
+            grad_norm = grad_norm ** 0.5
+            
             optimizer.step()
             total_loss += loss.item()
         avg_train_loss = total_loss / len(train_loader)
@@ -121,10 +141,14 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
         model.eval()
         with torch.no_grad():
             val_loss = loss_fn(model(X_val_t), y_val_t).item()
+            # Also compute prediction variance on a small batch
+            pred_sample = model(X_val_t[:32])
+            pred_var = pred_sample.var().item()
+        
         scheduler.step(val_loss)
         
         if (epoch+1) % 10 == 0:
-            print(f"Epoch {epoch+1:3d}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
+            print(f"Epoch {epoch+1:3d}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f} | Grad Norm: {grad_norm:.6f} | Pred Var: {pred_var:.6f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
         
         # Early stopping
         if val_loss < best_val_loss:
@@ -133,7 +157,8 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
             epochs_no_improve = 0
             os.makedirs('models', exist_ok=True)
             torch.save(model.state_dict(), f"models/kan_{module}_full.pt")
-            print(f"  -> New best model (val_loss={val_loss:.6f})")
+            if (epoch+1) % 10 == 0:
+                print(f"  -> New best model (val_loss={val_loss:.6f})")
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
@@ -145,7 +170,7 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
     joblib.dump(scaler_X, f'models/scaler_X_{module}_full.pkl')
     joblib.dump(scaler_y, f'models/scaler_y_{module}_full.pkl')
     
-    # Final test evaluation
+    # Final test evaluation using best model
     model.load_state_dict(torch.load(f"models/kan_{module}_full.pt"))
     model.eval()
     with torch.no_grad():
@@ -163,6 +188,7 @@ def train_full(module, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=
     }
     joblib.dump(results, f'metrics_{module}_full.pkl')
     print(f"Full model for {module} done. Best val loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
+    print(f"Test prediction mean: {test_pred.mean():.6f}, std: {test_pred.std():.6f}")
 
 def train_shrinking(module, start_year, epochs=150, seq_len=20, batch_size=64, lr=1e-3, patience=20):
     print(f"Shrinking window start={start_year} for {module}...")
@@ -178,13 +204,22 @@ def train_shrinking(module, start_year, epochs=150, seq_len=20, batch_size=64, l
         print(f"  -> Not enough samples ({n}), skipping.")
         return
     
+    print(f"  Total samples: {n}")
+    # Data sanity check
+    if np.isnan(y).any():
+        print("  NaN in targets, skipping")
+        return
+    if np.std(y) < 1e-6:
+        print("  Targets near-zero variance, skipping")
+        return
+    
     train_end = int(0.8 * n)
     val_end = int(0.9 * n)
     X_train_raw, y_train_raw = X[:train_end], y[:train_end]
     X_val_raw, y_val_raw = X[train_end:val_end], y[train_end:val_end]
     X_test_raw, y_test_raw = X[val_end:], y[val_end:]
     
-    # Scale features on training flat
+    # Scale features
     train_flat = X_train_raw.reshape(-1, X_train_raw.shape[-1])
     val_flat = X_val_raw.reshape(-1, X_val_raw.shape[-1])
     test_flat = X_test_raw.reshape(-1, X_test_raw.shape[-1])
@@ -194,6 +229,7 @@ def train_shrinking(module, start_year, epochs=150, seq_len=20, batch_size=64, l
     X_val_scaled = scaler_X.transform(val_flat).reshape(X_val_raw.shape)
     X_test_scaled = scaler_X.transform(test_flat).reshape(X_test_raw.shape)
     
+    # Scale targets
     scaler_y = StandardScaler()
     scaler_y.fit(y_train_raw)
     y_train_scaled = scaler_y.transform(y_train_raw)
