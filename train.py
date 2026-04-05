@@ -32,7 +32,7 @@ def load_raw_data():
     for col in all_cols:
         if col not in df.columns:
             df[col] = np.nan
-    df.fillna(method='ffill', inplace=True)
+    df.ffill(inplace=True)
     df.dropna(inplace=True)
     return df
 
