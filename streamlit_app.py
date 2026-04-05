@@ -10,7 +10,6 @@ from kan_model import TemporalKANForecaster
 import os
 from huggingface_hub import hf_hub_download
 
-# -------------------------------------------------------------------
 # Constants
 FI_ASSETS = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
 FI_BENCHMARK = 'AGG'
@@ -21,8 +20,7 @@ TRANSACTION_COST = 0.0012
 SEQ_LEN = 20
 HF_REPO = "P2SAMAPA/p2-etf-kan-engine-results"
 
-# -------------------------------------------------------------------
-# Session state init
+# Session state
 if 'prev_pick_fi' not in st.session_state:
     st.session_state.prev_pick_fi = None
 if 'prev_pick_equity' not in st.session_state:
@@ -69,7 +67,6 @@ def build_feature_sequence(df, module):
     return features.iloc[-SEQ_LEN:].values
 
 def ensure_model_file(local_path, repo_filename):
-    """Download file from Hugging Face if not exists locally."""
     if not os.path.exists(local_path):
         try:
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -86,41 +83,27 @@ def ensure_model_file(local_path, repo_filename):
             return False
     return True
 
-def load_model_and_scalers(module, mode='full', start_year=None):
-    if mode == 'full':
-        model_file = f"kan_{module}_full.pt"
-        scaler_x_file = f"scaler_X_{module}_full.pkl"
-        scaler_y_file = f"scaler_y_{module}_full.pkl"
-    else:
-        model_file = f"kan_{module}_shrinking_start{start_year}.pt"
-        scaler_x_file = f"scaler_X_{module}_shrinking_start{start_year}.pkl"
-        scaler_y_file = f"scaler_y_{module}_shrinking_start{start_year}.pkl"
-    
+def load_model_and_scalers(module, mode='full'):
+    model_file = f"kan_{module}_full.pt"
+    scaler_x_file = f"scaler_X_{module}_full.pkl"
+    scaler_y_file = f"scaler_y_{module}_full.pkl"
     local_model = f"models/{model_file}"
     local_scaler_x = f"models/{scaler_x_file}"
     local_scaler_y = f"models/{scaler_y_file}"
-    
-    # Download if missing
     if not (ensure_model_file(local_model, model_file) and
             ensure_model_file(local_scaler_x, scaler_x_file) and
             ensure_model_file(local_scaler_y, scaler_y_file)):
         return None, None, None
-    
-    # Load scalers
     scaler_X = joblib.load(local_scaler_x)
     scaler_y = joblib.load(local_scaler_y)
     n_features = scaler_X.mean_.shape[0]
     input_dim = SEQ_LEN * n_features
     output_dim = len(FI_ASSETS) if module == 'fi' else len(EQUITY_ASSETS)
-    
-    # ReLUKAN model architecture – must match training
-    model = TemporalKANForecaster(input_dim, hidden_dims=[256, 128, 64], output_dim=output_dim, grid_size=20)
-    # Load with error handling
+    model = TemporalKANForecaster(input_dim, hidden_dims=[128, 64], output_dim=output_dim, grid_size=20)
     try:
         model.load_state_dict(torch.load(local_model, map_location='cpu'))
     except RuntimeError as e:
         st.error(f"Model architecture mismatch: {e}")
-        st.info("Please ensure the training used the same kan_model.py (ReLUKAN) and hyperparameters.")
         return None, None, None
     model.eval()
     return model, scaler_X, scaler_y
@@ -137,6 +120,43 @@ def apply_transaction_cost(prev_pick, new_pick, gross_return):
         return gross_return, False
     net_return = gross_return - TRANSACTION_COST
     return net_return, True
+
+def load_metrics(module):
+    """Download and load metrics_*.pkl from HF."""
+    metrics_file = f"metrics_{module}_full.pkl"
+    local_path = f"models/{metrics_file}"
+    if not ensure_model_file(local_path, metrics_file):
+        return None
+    data = joblib.load(local_path)
+    return data
+
+def compute_metrics_from_predictions(test_pred, test_true):
+    """
+    test_pred: numpy array of predicted returns (daily)
+    test_true: numpy array of actual returns (daily)
+    Returns dict with annualized return (%), Sharpe ratio (float), max drawdown (%), hit rate (%)
+    """
+    # Assume daily returns; annualize with 252 trading days
+    ann_factor = np.sqrt(252)
+    mean_pred = np.mean(test_pred)
+    std_pred = np.std(test_pred)
+    # Sharpe (assuming risk-free rate = 0 for simplicity)
+    sharpe = (mean_pred / std_pred) * ann_factor if std_pred > 0 else 0.0
+    # Annualized return (as percentage)
+    ann_return = mean_pred * 252 * 100
+    # Max drawdown on predicted returns (cumulative)
+    cum_ret = np.cumprod(1 + test_pred)
+    peak = np.maximum.accumulate(cum_ret)
+    drawdown = (cum_ret - peak) / peak
+    max_dd = np.min(drawdown) * 100
+    # Hit rate: sign agreement
+    hit = np.mean(np.sign(test_pred) == np.sign(test_true)) * 100
+    return {
+        "ann_return": ann_return,
+        "sharpe": sharpe,
+        "max_dd": max_dd,
+        "hit_rate": hit
+    }
 
 # -------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="P2-ETF-KAN-ENGINE")
@@ -198,9 +218,25 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
             for m in MACRO_COLS:
                 st.metric(m, f"{latest_macro.get(m, 0):.2f}")
         
-        st.markdown("### Performance Metrics (Test Period: 2024–2026 YTD)")
-        metrics_data = {"Metric": ["ANN RETURN", "SHARPE", "MAX DD", "HIT RATE"], "Value": ["6.4%", "8.5%", "0.75", "52.0%"]}
-        st.dataframe(pd.DataFrame(metrics_data), use_container_width=True)
+        # Real metrics from test set
+        metrics_data = load_metrics(module)
+        if metrics_data is not None:
+            test_pred = np.array(metrics_data['test_predictions'])
+            test_true = np.array(metrics_data['test_true'])
+            # Flatten if needed (test_pred shape: (n_samples, n_assets) – we need per-asset? We'll average across assets for overall metrics)
+            # For simplicity, compute metrics on the first asset (or average across all)
+            # Better: compute metrics for each asset and show average? For demo, take mean across assets.
+            pred_flat = test_pred.mean(axis=1)
+            true_flat = test_true.mean(axis=1)
+            metrics = compute_metrics_from_predictions(pred_flat, true_flat)
+            st.markdown("### Performance Metrics (Test Period)")
+            metrics_df = pd.DataFrame({
+                "Metric": ["ANN RETURN", "SHARPE", "MAX DD", "HIT RATE"],
+                "Value": [f"{metrics['ann_return']:.1f}%", f"{metrics['sharpe']:.2f}", f"{metrics['max_dd']:.1f}%", f"{metrics['hit_rate']:.1f}%"]
+            })
+            st.dataframe(metrics_df, use_container_width=True)
+        else:
+            st.warning("Metrics file not found. Train the model first.")
         
         st.markdown("### Signal History")
         if st.session_state.signal_history:
