@@ -28,13 +28,16 @@ jobs:
       run: python train.py --mode full --module fi --epochs 150
     - name: Train Equity module
       run: python train.py --mode full --module equity --epochs 150
-    - name: Upload all models to HF (single commit)
+    - name: Upload all models to HF (single commit with retry)
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: python upload_all_models.py
+      continue-on-error: true   # Don't fail the workflow if upload fails (artifacts still saved)
     - name: Upload artifacts to GitHub (backup)
       uses: actions/upload-artifact@v4
       with:
-        name: trained-models
-        path: models/
+        name: trained-models-full
+        path: |
+          models/
+          metrics_*.pkl
         retention-days: 7
