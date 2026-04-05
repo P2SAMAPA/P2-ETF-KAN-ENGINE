@@ -113,9 +113,15 @@ def load_model_and_scalers(module, mode='full', start_year=None):
     input_dim = SEQ_LEN * n_features
     output_dim = len(FI_ASSETS) if module == 'fi' else len(EQUITY_ASSETS)
     
-    # ReLUKAN model architecture – must match training (grid_size=20, hidden_dims=[256,128,64])
+    # ReLUKAN model architecture – must match training
     model = TemporalKANForecaster(input_dim, hidden_dims=[256, 128, 64], output_dim=output_dim, grid_size=20)
-    model.load_state_dict(torch.load(local_model, map_location='cpu'))
+    # Load with error handling
+    try:
+        model.load_state_dict(torch.load(local_model, map_location='cpu'))
+    except RuntimeError as e:
+        st.error(f"Model architecture mismatch: {e}")
+        st.info("Please ensure the training used the same kan_model.py (ReLUKAN) and hyperparameters.")
+        return None, None, None
     model.eval()
     return model, scaler_X, scaler_y
 
