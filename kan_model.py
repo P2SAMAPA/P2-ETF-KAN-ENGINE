@@ -4,15 +4,11 @@ import torch.nn.functional as F
 import math
 
 class ReLUKANLayer(nn.Module):
-    """
-    ReLU-KAN: using ReLU as base activation and learnable piecewise linear functions.
-    """
     def __init__(self, in_features, out_features, grid_size=20, scale=0.1):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.grid_size = grid_size
-        
         self.base_weight = nn.Parameter(torch.Tensor(out_features, in_features))
         self.spline_weight = nn.Parameter(torch.Tensor(out_features, in_features, grid_size))
         grid = torch.linspace(-1, 1, steps=grid_size)
@@ -33,7 +29,9 @@ class ReLUKANLayer(nn.Module):
         return base_out + self.scale * spline_out
 
 class TemporalKANForecaster(nn.Module):
-    def __init__(self, input_dim, hidden_dims, output_dim, grid_size=20):
+    def __init__(self, input_dim, hidden_dims=None, output_dim=None, grid_size=20):
+        if hidden_dims is None:
+            hidden_dims = [256, 128]   # fixed architecture to match existing model
         super().__init__()
         layers = []
         prev = input_dim
