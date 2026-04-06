@@ -3,13 +3,13 @@ import pandas as pd
 import numpy as np
 import torch
 import joblib
+import requests
 from datetime import datetime, timedelta
 import pandas_market_calendars as mcal
 from datasets import load_dataset
 from kan_model import TemporalKANForecaster
 import os
-from huggingface_hub import hf_hub_download, list_repo_files
-import os
+import io
 
 # Constants
 FI_ASSETS = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
@@ -20,7 +20,7 @@ MACRO_COLS = ['VIX', 'DXY', 'T10Y2Y', 'TBILL_3M', 'IG_SPREAD', 'HY_SPREAD']
 TRANSACTION_COST = 0.0012
 SEQ_LEN = 20
 HF_REPO = "P2SAMAPA/p2-etf-kan-engine-results"
-HF_TOKEN = os.environ.get("HF_TOKEN", None)  # may be None in Streamlit Cloud
+BASE_URL = f"https://huggingface.co/datasets/{HF_REPO}/resolve/main"
 
 # Session state
 if 'prev_pick_fi' not in st.session_state:
@@ -68,25 +68,22 @@ def build_feature_sequence(df, module):
         return None
     return features.iloc[-SEQ_LEN:].values
 
-def ensure_file(local_path, repo_filename, subfolder=""):
-    if not os.path.exists(local_path):
-        try:
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            hf_hub_download(
-                repo_id=HF_REPO,
-                filename=repo_filename,
-                subfolder=subfolder,
-                repo_type="dataset",
-                local_dir="models",
-                local_dir_use_symlinks=False,
-                token=HF_TOKEN
-            )
-            st.info(f"✅ Downloaded {repo_filename}")
-            return True
-        except Exception as e:
-            st.warning(f"⚠️ Could not download {repo_filename}: {e}")
-            return False
-    return True
+def download_file(url, local_path):
+    """Download a file from a URL to local path if not already cached."""
+    if os.path.exists(local_path):
+        return True
+    try:
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        resp = requests.get(url, stream=True)
+        resp.raise_for_status()
+        with open(local_path, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        st.info(f"✅ Downloaded {os.path.basename(local_path)}")
+        return True
+    except Exception as e:
+        st.warning(f"⚠️ Failed to download {url}: {e}")
+        return False
 
 def load_model_and_scalers(module, mode='full', start_year=None):
     if mode == 'full':
@@ -104,9 +101,13 @@ def load_model_and_scalers(module, mode='full', start_year=None):
     local_scaler_x = f"models/{scaler_x_file}"
     local_scaler_y = f"models/{scaler_y_file}"
 
-    if not (ensure_file(local_model, model_file, subfolder) and
-            ensure_file(local_scaler_x, scaler_x_file, subfolder) and
-            ensure_file(local_scaler_y, scaler_y_file, subfolder)):
+    url_model = f"{BASE_URL}/{subfolder}/{model_file}" if subfolder else f"{BASE_URL}/{model_file}"
+    url_scaler_x = f"{BASE_URL}/{subfolder}/{scaler_x_file}" if subfolder else f"{BASE_URL}/{scaler_x_file}"
+    url_scaler_y = f"{BASE_URL}/{subfolder}/{scaler_y_file}" if subfolder else f"{BASE_URL}/{scaler_y_file}"
+
+    if not (download_file(url_model, local_model) and
+            download_file(url_scaler_x, local_scaler_x) and
+            download_file(url_scaler_y, local_scaler_y)):
         return None, None, None
 
     scaler_X = joblib.load(local_scaler_x)
@@ -140,13 +141,12 @@ def apply_transaction_cost(prev_pick, new_pick, gross_return):
 def load_metrics(module):
     fname = f"metrics_{module}_full.pkl"
     local = f"models/{fname}"
-    if ensure_file(local, fname, ""):
+    url = f"{BASE_URL}/{fname}"
+    if download_file(url, local):
         return joblib.load(local)
     return None
 
 def compute_metrics(test_pred, test_true):
-    # test_pred and test_true: numpy arrays of daily returns (samples x assets)
-    # average across assets for overall metrics
     pred_avg = test_pred.mean(axis=1)
     true_avg = test_true.mean(axis=1)
     ann_factor = np.sqrt(252)
@@ -162,16 +162,15 @@ def compute_metrics(test_pred, test_true):
     return ann_return, sharpe, max_dd, hit
 
 def get_shrinking_consensus(module, feature_seq):
-    """Load all shrinking models for the given module, compute predictions, return average predictions per asset."""
+    """List all shrinking model files via Hugging Face API and aggregate predictions."""
+    # We'll need to list files in the dataset. Since we don't have an API key, we can use the HF API without token for public datasets.
     try:
-        # List files in the dataset's shrinking_models folder
-        files = list_repo_files(HF_REPO, repo_type="dataset", token=HF_TOKEN)
-        # Filter for model files
-        pattern = f"kan_{module}_shrinking_start"
-        model_files = [f for f in files if f.startswith(pattern) and f.endswith(".pt")]
-        # The files are returned with full path? Actually they are relative to repo root.
-        # We need to check if they are inside shrinking_models/ subfolder
-        model_files = [f for f in model_files if f.startswith("shrinking_models/")]
+        api_url = f"https://huggingface.co/api/datasets/{HF_REPO}/tree/main/shrinking_models"
+        resp = requests.get(api_url)
+        if resp.status_code != 200:
+            return None
+        files = resp.json()
+        model_files = [f['path'] for f in files if f['type'] == 'file' and f['path'].startswith("shrinking_models/kan_{module}_shrinking_start") and f['path'].endswith(".pt")]
         if not model_files:
             return None
     except Exception as e:
@@ -180,7 +179,6 @@ def get_shrinking_consensus(module, feature_seq):
 
     preds = []
     for mf in model_files:
-        # Extract start_year from filename (e.g., shrinking_models/kan_equity_shrinking_start2008.pt)
         base = os.path.basename(mf)
         start_year = int(base.split("_start")[-1].split(".pt")[0])
         model, scaler_X, scaler_y = load_model_and_scalers(module, mode='shrinking', start_year=start_year)
@@ -190,8 +188,7 @@ def get_shrinking_consensus(module, feature_seq):
         preds.append(pred)
     if not preds:
         return None
-    avg_pred = np.mean(preds, axis=0)
-    return avg_pred
+    return np.mean(preds, axis=0)
 
 # -------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="P2-ETF-KAN-ENGINE")
@@ -281,7 +278,6 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
         else:
             st.warning("Metrics not available yet.")
 
-        # --- Signal history (placeholder) ---
         st.markdown("### Signal History")
         if st.session_state.signal_history:
             hist_df = pd.DataFrame(st.session_state.signal_history, columns=["Date","Pick","Conviction","Actual Return","Hit"])
