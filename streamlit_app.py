@@ -8,8 +8,9 @@ import pandas_market_calendars as mcal
 from datasets import load_dataset
 from kan_model import TemporalKANForecaster
 import os
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, list_repo_files
 
+# Constants
 FI_ASSETS = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
 FI_BENCHMARK = 'AGG'
 EQUITY_ASSETS = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XME', 'GDX', 'IWM']
@@ -19,6 +20,7 @@ TRANSACTION_COST = 0.0012
 SEQ_LEN = 20
 HF_REPO = "P2SAMAPA/p2-etf-kan-engine-results"
 
+# Session state
 if 'prev_pick_fi' not in st.session_state:
     st.session_state.prev_pick_fi = None
 if 'prev_pick_equity' not in st.session_state:
@@ -26,6 +28,7 @@ if 'prev_pick_equity' not in st.session_state:
 if 'signal_history' not in st.session_state:
     st.session_state.signal_history = []
 
+# -------------------------------------------------------------------
 def get_next_trading_day():
     nyse = mcal.get_calendar('NYSE')
     today = datetime.now().date()
@@ -63,11 +66,17 @@ def build_feature_sequence(df, module):
         return None
     return features.iloc[-SEQ_LEN:].values
 
-def ensure_file(local_path, repo_filename):
+def ensure_file(local_path, repo_filename, subfolder=""):
     if not os.path.exists(local_path):
         try:
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            hf_hub_download(repo_id=HF_REPO, filename=repo_filename, local_dir="models", local_dir_use_symlinks=False)
+            hf_hub_download(
+                repo_id=HF_REPO,
+                filename=repo_filename,
+                subfolder=subfolder,
+                local_dir="models",
+                local_dir_use_symlinks=False
+            )
             st.info(f"✅ Downloaded {repo_filename}")
             return True
         except Exception as e:
@@ -75,17 +84,27 @@ def ensure_file(local_path, repo_filename):
             return False
     return True
 
-def load_model_and_scalers(module):
-    model_file = f"kan_{module}_full.pt"
-    scaler_x_file = f"scaler_X_{module}_full.pkl"
-    scaler_y_file = f"scaler_y_{module}_full.pkl"
+def load_model_and_scalers(module, mode='full', start_year=None):
+    if mode == 'full':
+        model_file = f"kan_{module}_full.pt"
+        scaler_x_file = f"scaler_X_{module}_full.pkl"
+        scaler_y_file = f"scaler_y_{module}_full.pkl"
+        subfolder = ""
+    else:
+        model_file = f"kan_{module}_shrinking_start{start_year}.pt"
+        scaler_x_file = f"scaler_X_{module}_shrinking_start{start_year}.pkl"
+        scaler_y_file = f"scaler_y_{module}_shrinking_start{start_year}.pkl"
+        subfolder = "shrinking_models"
+
     local_model = f"models/{model_file}"
     local_scaler_x = f"models/{scaler_x_file}"
     local_scaler_y = f"models/{scaler_y_file}"
-    if not (ensure_file(local_model, model_file) and
-            ensure_file(local_scaler_x, scaler_x_file) and
-            ensure_file(local_scaler_y, scaler_y_file)):
+
+    if not (ensure_file(local_model, model_file, subfolder) and
+            ensure_file(local_scaler_x, scaler_x_file, subfolder) and
+            ensure_file(local_scaler_y, scaler_y_file, subfolder)):
         return None, None, None
+
     scaler_X = joblib.load(local_scaler_x)
     scaler_y = joblib.load(local_scaler_y)
     n_features = scaler_X.mean_.shape[0]
@@ -117,13 +136,13 @@ def apply_transaction_cost(prev_pick, new_pick, gross_return):
 def load_metrics(module):
     fname = f"metrics_{module}_full.pkl"
     local = f"models/{fname}"
-    if ensure_file(local, fname):
+    if ensure_file(local, fname, ""):
         return joblib.load(local)
     return None
 
 def compute_metrics(test_pred, test_true):
-    # test_pred and test_true are numpy arrays of daily returns (flattened or averaged across assets)
-    # We'll compute metrics on the average across assets for simplicity
+    # test_pred and test_true: numpy arrays of daily returns (samples x assets)
+    # average across assets for overall metrics
     pred_avg = test_pred.mean(axis=1)
     true_avg = test_true.mean(axis=1)
     ann_factor = np.sqrt(252)
@@ -137,6 +156,33 @@ def compute_metrics(test_pred, test_true):
     max_dd = np.min(drawdown) * 100
     hit = np.mean(np.sign(pred_avg) == np.sign(true_avg)) * 100
     return ann_return, sharpe, max_dd, hit
+
+def get_shrinking_consensus(module, feature_seq):
+    """Load all shrinking models for the given module, compute predictions, return average predictions per asset."""
+    # List all files in shrinking_models subfolder on HF
+    try:
+        files = list_repo_files(HF_REPO, repo_type="dataset")
+        pattern = f"kan_{module}_shrinking_start"
+        model_files = [f for f in files if f.startswith(pattern) and f.endswith(".pt")]
+        if not model_files:
+            return None
+    except Exception as e:
+        st.warning(f"Could not list shrinking models: {e}")
+        return None
+
+    preds = []
+    for mf in model_files:
+        # extract start_year from filename
+        start_year = int(mf.split("_start")[-1].split(".pt")[0])
+        model, scaler_X, scaler_y = load_model_and_scalers(module, mode='shrinking', start_year=start_year)
+        if model is None:
+            continue
+        pred = get_prediction(model, scaler_X, scaler_y, feature_seq)
+        preds.append(pred)
+    if not preds:
+        return None
+    avg_pred = np.mean(preds, axis=0)
+    return avg_pred
 
 # -------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="P2-ETF-KAN-ENGINE")
@@ -161,38 +207,58 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
         if feat_seq is None:
             st.warning(f"Insufficient data for {module}.")
             continue
-        model, scaler_X, scaler_y = load_model_and_scalers(module)
-        if model is None:
-            st.warning(f"Model for {module} not available. Train via GitHub Actions.")
-            continue
-        pred_returns = get_prediction(model, scaler_X, scaler_y, feat_seq)
-        top_idx = np.argmax(pred_returns)
-        top_asset = assets[top_idx]
-        top_return = pred_returns[top_idx] * 100
-        prev = st.session_state[f'prev_pick_{module}']
-        net_return, switched = apply_transaction_cost(prev, top_asset, top_return/100)
-        display_return = net_return * 100 if switched else top_return
-        if switched:
-            st.info(f"📉 Transaction cost (12bps): switched from {prev} to {top_asset}")
-        st.session_state[f'prev_pick_{module}'] = top_asset
 
-        col1, col2 = st.columns([2,1])
-        with col1:
-            st.markdown(f"## {top_asset}")
-            st.markdown(f"### {display_return:.1f}% conviction")
-            st.caption(f"Signal for {get_next_trading_day()} · Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
-            st.caption("Source: Full dataset (2008–2026 YTD)")
-            sorted_idx = np.argsort(pred_returns)[::-1]
-            if len(sorted_idx) > 1:
-                st.markdown(f"2nd: **{assets[sorted_idx[1]]}** {pred_returns[sorted_idx[1]]*100:.1f}%")
-            if len(sorted_idx) > 2:
-                st.markdown(f"3rd: **{assets[sorted_idx[2]]}** {pred_returns[sorted_idx[2]]*100:.1f}%")
-        with col2:
-            st.markdown("### Macro Pills")
-            for m in MACRO_COLS:
-                st.metric(m, f"{latest_macro.get(m, 0):.2f}")
+        # --- Full dataset model prediction (hero box) ---
+        model_full, scaler_X_full, scaler_y_full = load_model_and_scalers(module, mode='full')
+        if model_full is None:
+            st.warning(f"Full model for {module} not available. Train via GitHub Actions.")
+        else:
+            pred_returns = get_prediction(model_full, scaler_X_full, scaler_y_full, feat_seq)
+            top_idx = np.argmax(pred_returns)
+            top_asset = assets[top_idx]
+            top_return = pred_returns[top_idx] * 100
 
-        # Real metrics
+            prev = st.session_state[f'prev_pick_{module}']
+            net_return, switched = apply_transaction_cost(prev, top_asset, top_return/100)
+            display_return = net_return * 100 if switched else top_return
+            if switched:
+                st.info(f"📉 Transaction cost (12bps): switched from {prev} to {top_asset}")
+            st.session_state[f'prev_pick_{module}'] = top_asset
+
+            col1, col2 = st.columns([2,1])
+            with col1:
+                st.markdown(f"## {top_asset}")
+                st.markdown(f"### {display_return:.1f}% conviction")
+                st.caption(f"Signal for {get_next_trading_day()} · Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+                st.caption("Source: Full dataset (2008–2026 YTD)")
+                sorted_idx = np.argsort(pred_returns)[::-1]
+                if len(sorted_idx) > 1:
+                    st.markdown(f"2nd: **{assets[sorted_idx[1]]}** {pred_returns[sorted_idx[1]]*100:.1f}%")
+                if len(sorted_idx) > 2:
+                    st.markdown(f"3rd: **{assets[sorted_idx[2]]}** {pred_returns[sorted_idx[2]]*100:.1f}%")
+            with col2:
+                st.markdown("### Macro Pills")
+                for m in MACRO_COLS:
+                    st.metric(m, f"{latest_macro.get(m, 0):.2f}")
+
+        # --- Shrinking window consensus (ensemble) ---
+        with st.expander("Show Ensemble Prediction (Shrinking Windows Consensus)"):
+            consensus_pred = get_shrinking_consensus(module, feat_seq)
+            if consensus_pred is None:
+                st.write("Shrinking window models not yet available. Train via `train_shrinking.yml`.")
+            else:
+                top_idx_cons = np.argmax(consensus_pred)
+                top_asset_cons = assets[top_idx_cons]
+                top_return_cons = consensus_pred[top_idx_cons] * 100
+                st.markdown(f"**Consensus top pick (across all windows):** {top_asset_cons} ({top_return_cons:.1f}% predicted return)")
+                # Show second and third
+                sorted_idx_cons = np.argsort(consensus_pred)[::-1]
+                if len(sorted_idx_cons) > 1:
+                    st.write(f"2nd: {assets[sorted_idx_cons[1]]} ({consensus_pred[sorted_idx_cons[1]]*100:.1f}%)")
+                if len(sorted_idx_cons) > 2:
+                    st.write(f"3rd: {assets[sorted_idx_cons[2]]} ({consensus_pred[sorted_idx_cons[2]]*100:.1f}%)")
+
+        # --- Real metrics from test set ---
         metrics_data = load_metrics(module)
         if metrics_data is not None:
             test_pred = np.array(metrics_data['test_predictions'])
@@ -207,13 +273,12 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
         else:
             st.warning("Metrics not available yet.")
 
+        # --- Signal history (placeholder) ---
         st.markdown("### Signal History")
         if st.session_state.signal_history:
             hist_df = pd.DataFrame(st.session_state.signal_history, columns=["Date","Pick","Conviction","Actual Return","Hit"])
             st.dataframe(hist_df, use_container_width=True)
         else:
             st.write("No signals recorded yet.")
-        with st.expander("Show Ensemble Prediction (Shrinking Windows Consensus)"):
-            st.write("Shrinking window models not yet available. Train via `train_shrinking.yml`.")
 
 st.caption("P2-ETF-KAN-ENGINE - Research only · Not financial advice")
