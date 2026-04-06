@@ -10,7 +10,6 @@ from datasets import load_dataset
 from kan_model import TemporalKANForecaster
 import os
 from huggingface_hub import hf_hub_download, list_repo_files
-import warnings
 
 # ── Constants ────────────────────────────────────────────────────────────────
 FI_ASSETS = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
@@ -22,6 +21,7 @@ TRANSACTION_COST = 0.0012
 SEQ_LEN = 20
 HF_REPO = "P2SAMAPA/p2-etf-kan-engine-results"
 RISK_FREE_RATE = 0.05
+MAX_SHARPE_FOR_WEIGHT = 3.0  # CAP: Sharpe above 3 is treated as 3
 
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="P2‑ETF‑KAN‑ENGINE", page_icon="⚡", initial_sidebar_state="collapsed")
@@ -54,6 +54,7 @@ st.markdown("""
 .zero-weight{background:#ffebee}
 .valid-weight{background:#e8f5e9}
 .top-etf{font-weight:700;color:#1a1a1a}
+.sharpe-capped{color:#ff9800;font-size:0.7rem}
 </style>
 """, unsafe_allow_html=True)
 
@@ -212,7 +213,7 @@ def load_metrics_full(module):
             pass
     return None
 
-# ── WEIGHTED CONSENSUS WITH TOP ETF PER YEAR ─────────────────────────────────
+# ── FIXED WEIGHTED CONSENSUS ─────────────────────────────────────────────────
 
 def get_weighted_shrinking_consensus_with_metrics(module, feature_seq, assets):
     try:
@@ -228,6 +229,8 @@ def get_weighted_shrinking_consensus_with_metrics(module, feature_seq, assets):
     if not model_files:
         return None, None, None
 
+    # Use set to avoid duplicates
+    processed_years = set()
     window_data = []
     all_metrics_display = []
 
@@ -240,17 +243,17 @@ def get_weighted_shrinking_consensus_with_metrics(module, feature_seq, assets):
         except:
             continue
 
+        # Skip duplicate years
+        if year in processed_years:
+            continue
+        processed_years.add(year)
+
         model, sx, sy, metrics = load_model_and_scalers(module, mode='shrinking', start_year=year)
         if model is None:
             all_metrics_display.append({
-                'year': year,
-                'status': 'Model Load Failed',
-                'ann_ret': None,
-                'sharpe': None,
-                'max_dd': None,
-                'top_etf': 'N/A',
-                'top_etf_return': None,
-                'weight': 0
+                'year': year, 'top_etf': 'N/A', 'top_etf_return': None,
+                'status': 'Model Load Failed', 'ann_ret': None, 'sharpe': None, 'max_dd': None,
+                'sharpe_capped': None, 'weight': 0, 'raw_score': 0
             })
             continue
 
@@ -258,23 +261,16 @@ def get_weighted_shrinking_consensus_with_metrics(module, feature_seq, assets):
             pred = get_prediction(model, sx, sy, feature_seq)
         except:
             all_metrics_display.append({
-                'year': year,
-                'status': 'Prediction Failed',
-                'ann_ret': None,
-                'sharpe': None,
-                'max_dd': None,
-                'top_etf': 'N/A',
-                'top_etf_return': None,
-                'weight': 0
+                'year': year, 'top_etf': 'N/A', 'top_etf_return': None,
+                'status': 'Prediction Failed', 'ann_ret': None, 'sharpe': None, 'max_dd': None,
+                'sharpe_capped': None, 'weight': 0, 'raw_score': 0
             })
             continue
 
-        # Get top ETF for this window
         top_etf_idx = np.argmax(pred)
         top_etf = assets[top_etf_idx]
         top_etf_return = pred[top_etf_idx]
 
-        # Get metrics
         if metrics and 'test_predictions' in metrics and 'test_true' in metrics:
             test_pred = np.array(metrics['test_predictions'])
             test_true = np.array(metrics['test_true'])
@@ -285,28 +281,22 @@ def get_weighted_shrinking_consensus_with_metrics(module, feature_seq, assets):
             max_dd = -10.0
             pred_var = np.var(pred)
 
+        # CAP SHARPE for weight calculation (not for display)
+        sharpe_capped = min(abs(sharpe), MAX_SHARPE_FOR_WEIGHT) * (1 if sharpe >= 0 else -1)
+
         is_negative = ann_ret < 0
 
         window_data.append({
-            'year': year,
-            'prediction': pred,
-            'ann_ret': ann_ret,
-            'sharpe': sharpe,
-            'max_dd': max_dd,
-            'is_negative': is_negative,
-            'top_etf': top_etf,
-            'top_etf_return': top_etf_return
+            'year': year, 'prediction': pred, 'ann_ret': ann_ret, 'sharpe': sharpe,
+            'sharpe_capped': sharpe_capped, 'max_dd': max_dd, 'is_negative': is_negative,
+            'top_etf': top_etf, 'top_etf_return': top_etf_return
         })
 
         all_metrics_display.append({
-            'year': year,
+            'year': year, 'top_etf': top_etf, 'top_etf_return': top_etf_return,
             'status': 'Valid' if not is_negative else 'Excluded (Negative)',
-            'ann_ret': ann_ret,
-            'sharpe': sharpe,
-            'max_dd': max_dd,
-            'top_etf': top_etf,
-            'top_etf_return': top_etf_return,
-            'weight': 0
+            'ann_ret': ann_ret, 'sharpe': sharpe, 'sharpe_capped': sharpe_capped,
+            'max_dd': max_dd, 'weight': 0, 'raw_score': 0
         })
 
     if not window_data:
@@ -314,28 +304,24 @@ def get_weighted_shrinking_consensus_with_metrics(module, feature_seq, assets):
 
     n_etfs = len(assets)
 
-    # Calculate window scores
+    # Calculate window scores using CAPPED Sharpe
     window_scores = []
     valid_windows = []
-    valid_metrics_indices = []
 
     for i, data in enumerate(window_data):
         ann_ret = data['ann_ret']
-        sharpe = data['sharpe']
+        sharpe_capped = data['sharpe_capped']  # USE CAPPED VERSION
         max_dd = data['max_dd']
 
         if data['is_negative']:
             window_scores.append(0)
         else:
             dd_score = 100 + max_dd
-            sharpe_score = sharpe * 10
+            sharpe_score = sharpe_capped * 10  # CAPPED
             raw_score = (0.60 * ann_ret) + (0.20 * dd_score) + (0.10 * sharpe_score)
             window_scores.append(raw_score)
             valid_windows.append(i)
-            for j, m in enumerate(all_metrics_display):
-                if m['year'] == data['year']:
-                    valid_metrics_indices.append(j)
-                    break
+            all_metrics_display[i]['raw_score'] = raw_score
 
     # Calculate frequency scores
     frequency_scores = np.zeros(n_etfs)
@@ -352,9 +338,7 @@ def get_weighted_shrinking_consensus_with_metrics(module, feature_seq, assets):
         freq_component = 0.10 * avg_frequency
         final_score = base_score + freq_component
         final_window_scores.append(final_score)
-
-        display_idx = valid_metrics_indices[idx]
-        all_metrics_display[display_idx]['weight'] = final_score
+        all_metrics_display[w]['raw_score'] = final_score
 
     # Normalize weights
     total_weight = sum(final_window_scores)
@@ -363,10 +347,9 @@ def get_weighted_shrinking_consensus_with_metrics(module, feature_seq, assets):
 
     normalized_weights = [w / total_weight for w in final_window_scores]
 
-    # Update display metrics with normalized weights
+    # Update display metrics with CORRECT normalized weights
     for idx, w in enumerate(valid_windows):
-        display_idx = valid_metrics_indices[idx]
-        all_metrics_display[display_idx]['weight'] = normalized_weights[idx]
+        all_metrics_display[w]['weight'] = normalized_weights[idx]
 
     # Calculate weighted prediction
     weighted_pred = np.zeros(n_etfs)
@@ -397,22 +380,31 @@ def render_html(html: str):
     st.markdown(f'<div style="margin:0">{html}</div>', unsafe_allow_html=True)
 
 def render_metrics_table(all_metrics, assets):
-    """Render HTML table with top ETF for each year"""
-    rows = ""
+    """Render HTML table with top ETF for each year - NO DUPLICATES"""
+    # Remove duplicates and sort
+    seen_years = set()
+    unique_metrics = []
     for m in sorted(all_metrics, key=lambda x: x['year']):
+        if m['year'] not in seen_years:
+            seen_years.add(m['year'])
+            unique_metrics.append(m)
+
+    rows = ""
+    for m in unique_metrics:
         year = m['year']
         status = m['status']
         ann_ret = f"{m['ann_ret']:+.1f}%" if m['ann_ret'] is not None else "N/A"
         sharpe = f"{m['sharpe']:.2f}" if m['sharpe'] is not None else "N/A"
+        sharpe_capped = f" (capped: {m['sharpe_capped']:.1f})" if m.get('sharpe_capped') and abs(m['sharpe_capped']) != abs(m['sharpe']) else ""
         max_dd = f"{m['max_dd']:.1f}%" if m['max_dd'] is not None else "N/A"
-        weight = f"{m['weight']:.1%}" if m['weight'] > 0 else "0%"
+        weight = f"{m['weight']:.1%}" if m.get('weight', 0) > 0 else "0%"
         top_etf = m.get('top_etf', 'N/A')
         top_ret = f"{m['top_etf_return']*100:+.2f}%" if m.get('top_etf_return') is not None else "N/A"
 
         status_class = "zero-weight" if "Excluded" in status else "valid-weight" if status == "Valid" else ""
         ann_class = "positive" if m['ann_ret'] and m['ann_ret'] >= 0 else "negative" if m['ann_ret'] and m['ann_ret'] < 0 else ""
 
-        rows += f'<tr class="{status_class}"><td>{year}</td><td class="top-etf">{top_etf}</td><td>{top_ret}</td><td>{status}</td><td class="{ann_class}">{ann_ret}</td><td>{sharpe}</td><td>{max_dd}</td><td>{weight}</td></tr>'
+        rows += f'<tr class="{status_class}"><td>{year}</td><td class="top-etf">{top_etf}</td><td>{top_ret}</td><td>{status}</td><td class="{ann_class}">{ann_ret}</td><td>{sharpe}<span class="sharpe-capped">{sharpe_capped}</span></td><td>{max_dd}</td><td>{weight}</td></tr>'
 
     html = f'<table class="metrics-table"><tr><th>Year</th><th>Top ETF</th><th>Top ETF Return</th><th>Status</th><th>Ann Return</th><th>Sharpe</th><th>Max DD</th><th>Weight</th></tr>{rows}</table>'
     return html
@@ -504,7 +496,7 @@ for tab, module, assets, benchmark in [
 
                 meta_c = f'<div class="hero-meta">Signal for &nbsp;&nbsp;<strong>{next_day}</strong><br>Generated &nbsp;&nbsp;<strong>{now_str}</strong><br>Benchmark &nbsp;&nbsp;<strong>{benchmark}</strong></div>'
 
-                consensus_html = f'<div class="consensus-info">{cons_info["valid_windows"]}/{cons_info["total_windows"]} windows used · 60% return + 20% DD + 10% Sharpe + 10% freq</div>' if cons_info else ''
+                consensus_html = f'<div class="consensus-info">{cons_info["valid_windows"]}/{cons_info["total_windows"]} windows used · Sharpe capped at {MAX_SHARPE_FOR_WEIGHT} for weighting</div>' if cons_info else ''
 
                 pred_var_c = np.var(cons_pred)
                 st.session_state.pred_var_consensus = pred_var_c
@@ -512,22 +504,23 @@ for tab, module, assets, benchmark in [
 
                 render_html(f'<div class="hero-box"><div style="font-size:0.85rem;color:#888;margin-bottom:0.3rem">Weighted Shrinking Consensus</div><div class="hero-ticker">{top_asset_c}</div><div class="hero-return">{cons_pred[top_idx_c]*100:+.2f}% consensus</div>{meta_c}{consensus_html}{runners_html(assets, sorted_c, cons_pred)}{debug_html_c}</div>')
 
-        # ── Shrinking Metrics Dropdown with Top ETF ─────────────────────────────────────
+        # ── Shrinking Metrics Dropdown ─────────────────────────────────────
         if all_metrics and len(all_metrics) > 0:
             with st.expander(f"📊 Shrinking Windows Metrics ({module.upper()})", expanded=False):
                 st.markdown("**All years with top ETF pick and metrics:**")
                 st.markdown("- 🟢 Green rows: Valid windows (positive return, included in consensus)")
                 st.markdown("- 🔴 Red rows: Excluded windows (negative return, zero weight)")
-                st.markdown("- **Top ETF**: Highest predicted return ETF for that year")
-                st.markdown("- **Top ETF Return**: Raw predicted return for that ETF")
+                st.markdown("- **Sharpe (capped: X)**: Shows if Sharpe was capped at 3.0 for weight calculation")
+                st.markdown("- **Weight**: Normalized weight in final consensus (sums to 100%)")
 
                 table_html = render_metrics_table(all_metrics, assets)
                 render_html(table_html)
 
-                st.markdown("""
-                **Weight Formula:**
+                st.markdown(f"""
+                **Weight Formula (Sharpe capped at {MAX_SHARPE_FOR_WEIGHT}):**
                 ```
-                Score = (0.60 × AnnReturn) + (0.20 × (100 + MaxDD)) + (0.10 × Sharpe × 10) + (0.10 × AvgFreq)
+                Score = (0.60 × AnnReturn) + (0.20 × (100 + MaxDD)) + (0.10 × min(Sharpe, {MAX_SHARPE_FOR_WEIGHT}) × 10) + (0.10 × AvgFreq)
+
                 If AnnReturn < 0: Weight = 0 (excluded)
                 Else: Weight = Score / Sum(All Valid Scores)
                 ```
