@@ -90,7 +90,7 @@ def download_file(filename, subfolder="", max_retries=3):
                 repo_id=HF_REPO,
                 filename=filename,
                 subfolder=subfolder if subfolder else None,
-                repo_type="models",
+                repo_type="model",
                 local_dir=local_dir,
                 local_dir_use_symlinks=False,
                 token=HF_TOKEN  # Will be None if not set, which is fine for public repos
@@ -181,7 +181,7 @@ def compute_metrics(test_pred, test_true):
 def get_shrinking_consensus(module, feature_seq):
     """Load all shrinking models and average predictions."""
     try:
-        files = list_repo_files(HF_REPO, repo_type="models", token=HF_TOKEN)
+        files = list_repo_files(HF_REPO, repo_type="model", token=HF_TOKEN)
         pattern = f"shrinking_models/kan_{module}_shrinking_start"
         model_files = [f for f in files if f.startswith(pattern) and f.endswith(".pt")]
         if not model_files:
