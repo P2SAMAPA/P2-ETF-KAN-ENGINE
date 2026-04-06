@@ -9,6 +9,7 @@ from datasets import load_dataset
 from kan_model import TemporalKANForecaster
 import os
 from huggingface_hub import hf_hub_download, list_repo_files
+import os
 
 # Constants
 FI_ASSETS = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
@@ -19,6 +20,7 @@ MACRO_COLS = ['VIX', 'DXY', 'T10Y2Y', 'TBILL_3M', 'IG_SPREAD', 'HY_SPREAD']
 TRANSACTION_COST = 0.0012
 SEQ_LEN = 20
 HF_REPO = "P2SAMAPA/p2-etf-kan-engine-results"
+HF_TOKEN = os.environ.get("HF_TOKEN", None)  # may be None in Streamlit Cloud
 
 # Session state
 if 'prev_pick_fi' not in st.session_state:
@@ -74,8 +76,10 @@ def ensure_file(local_path, repo_filename, subfolder=""):
                 repo_id=HF_REPO,
                 filename=repo_filename,
                 subfolder=subfolder,
+                repo_type="dataset",
                 local_dir="models",
-                local_dir_use_symlinks=False
+                local_dir_use_symlinks=False,
+                token=HF_TOKEN
             )
             st.info(f"✅ Downloaded {repo_filename}")
             return True
@@ -159,11 +163,15 @@ def compute_metrics(test_pred, test_true):
 
 def get_shrinking_consensus(module, feature_seq):
     """Load all shrinking models for the given module, compute predictions, return average predictions per asset."""
-    # List all files in shrinking_models subfolder on HF
     try:
-        files = list_repo_files(HF_REPO, repo_type="dataset")
+        # List files in the dataset's shrinking_models folder
+        files = list_repo_files(HF_REPO, repo_type="dataset", token=HF_TOKEN)
+        # Filter for model files
         pattern = f"kan_{module}_shrinking_start"
         model_files = [f for f in files if f.startswith(pattern) and f.endswith(".pt")]
+        # The files are returned with full path? Actually they are relative to repo root.
+        # We need to check if they are inside shrinking_models/ subfolder
+        model_files = [f for f in model_files if f.startswith("shrinking_models/")]
         if not model_files:
             return None
     except Exception as e:
@@ -172,8 +180,9 @@ def get_shrinking_consensus(module, feature_seq):
 
     preds = []
     for mf in model_files:
-        # extract start_year from filename
-        start_year = int(mf.split("_start")[-1].split(".pt")[0])
+        # Extract start_year from filename (e.g., shrinking_models/kan_equity_shrinking_start2008.pt)
+        base = os.path.basename(mf)
+        start_year = int(base.split("_start")[-1].split(".pt")[0])
         model, scaler_X, scaler_y = load_model_and_scalers(module, mode='shrinking', start_year=start_year)
         if model is None:
             continue
@@ -251,7 +260,6 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
                 top_asset_cons = assets[top_idx_cons]
                 top_return_cons = consensus_pred[top_idx_cons] * 100
                 st.markdown(f"**Consensus top pick (across all windows):** {top_asset_cons} ({top_return_cons:.1f}% predicted return)")
-                # Show second and third
                 sorted_idx_cons = np.argsort(consensus_pred)[::-1]
                 if len(sorted_idx_cons) > 1:
                     st.write(f"2nd: {assets[sorted_idx_cons[1]]} ({consensus_pred[sorted_idx_cons[1]]*100:.1f}%)")
