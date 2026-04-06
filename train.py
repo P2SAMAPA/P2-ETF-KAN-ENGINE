@@ -45,7 +45,7 @@ def create_features_and_targets(df, assets, seq_len=20):
         y_seq.append(y[i+seq_len])
     return np.array(X_seq), np.array(y_seq), features.columns.tolist(), assets
 
-def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience=80):  # INCREASED: lr from 1e-3 to 5e-3
+def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience=80):
     print("Loading raw data...")
     df = load_raw_data()
     assets = FI_ASSETS if module == 'fi' else EQUITY_ASSETS
@@ -86,10 +86,8 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
     input_dim = seq_len * X_train_scaled.shape[-1]
     model = TemporalKANForecaster(input_dim, hidden_dims=[256,128], output_dim=len(assets), grid_size=20, seq_len=seq_len)
 
-    # Initialize KAN grids with a sample of training data
     model.init_grids(X_train_t[:min(2048, len(X_train_t))])
 
-    # INCREASED: Learning rate from 1e-3 to 5e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     loss_fn = nn.MSELoss()
@@ -109,18 +107,11 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
             optimizer.zero_grad()
             pred = model(batch_X)
 
-            # MSE loss
             mse_loss = loss_fn(pred, batch_y)
-
-            # VARIANCE BONUS: Encourage prediction spread (negative because we maximize)
-            # Scale: 0.1 means 10% weight to variance maximization
-            var_bonus = -0.1 * pred.var()  # Negative because we want HIGH variance
-
-            # Combined loss
+            var_bonus = -0.1 * pred.var()
             loss = mse_loss + var_bonus
 
             loss.backward()
-            # INCREASED: Gradient clipping from 1.0 to 5.0 for bigger updates
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
@@ -162,10 +153,8 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
         test_pred_scaled = model(X_test_t).numpy()
         test_pred = scaler_y.inverse_transform(test_pred_scaled)
 
-        # Log final prediction variance
         final_pred_var = np.var(test_pred)
-        print(f"
-Final test prediction variance: {final_pred_var:.6f}")
+        print(f"\nFinal test prediction variance: {final_pred_var:.6f}")
         print(f"Test prediction mean: {test_pred.mean():.6f}, std: {test_pred.std():.6f}")
 
     results = {
@@ -180,7 +169,7 @@ Final test prediction variance: {final_pred_var:.6f}")
     joblib.dump(results, f'metrics_{module}_full.pkl')
     print(f"Full model for {module} done. Best val loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
 
-def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience=80):  # INCREASED: lr
+def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience=80):
     print(f"Shrinking window start={start_year} for {module}...")
     df = load_raw_data()
     current_year = pd.Timestamp.now().year
@@ -226,7 +215,6 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
     input_dim = seq_len * X_train_scaled.shape[-1]
     model = TemporalKANForecaster(input_dim, hidden_dims=[256,128], output_dim=len(assets), grid_size=20, seq_len=seq_len)
 
-    # Initialize KAN grids
     model.init_grids(X_train_t[:min(2048, len(X_train_t))])
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0)
@@ -247,11 +235,11 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
             pred = model(batch_X)
 
             mse_loss = loss_fn(pred, batch_y)
-            var_bonus = -0.1 * pred.var()  # VARIANCE BONUS
+            var_bonus = -0.1 * pred.var()
             loss = mse_loss + var_bonus
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)  # INCREASED
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
             total_loss += mse_loss.item()
@@ -291,8 +279,7 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
         test_pred_scaled = model(X_test_t).numpy()
         test_pred = scaler_y.inverse_transform(test_pred_scaled)
         final_pred_var = np.var(test_pred)
-        print(f"
- Final test prediction variance: {final_pred_var:.6f}")
+        print(f"\n Final test prediction variance: {final_pred_var:.6f}")
 
     results = {
         'start_year': start_year,
@@ -313,7 +300,7 @@ if __name__ == '__main__':
     parser.add_argument('--module', choices=['fi', 'equity'], required=True)
     parser.add_argument('--epochs', type=int, default=300)
     parser.add_argument('--batch-size', type=int, default=512)
-    parser.add_argument('--lr', type=float, default=5e-3)  # INCREASED default
+    parser.add_argument('--lr', type=float, default=5e-3)
     parser.add_argument('--patience', type=int, default=80)
     parser.add_argument('--start-year', type=int)
     args = parser.parse_args()
