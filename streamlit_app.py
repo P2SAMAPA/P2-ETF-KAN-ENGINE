@@ -462,18 +462,24 @@ def get_shrinking_consensus(module, feature_seq):
 
 
 def runners_html(assets, sorted_idx, pred):
-    html = '<hr class="hero-divider"><div class="hero-runners">'
+    """Build compact single-line HTML for 2nd/3rd runners-up."""
+    items = ""
     for rank, label in enumerate(["2nd", "3rd"], start=1):
         if len(sorted_idx) > rank:
             i = sorted_idx[rank]
-            html += f"""
-            <div class="runner-item">
-                <div class="runner-label">{label}</div>
-                <div class="runner-ticker">{assets[i]}</div>
-                <div class="runner-pct">{pred[i]*100:+.2f}%</div>
-            </div>"""
-    html += "</div>"
-    return html
+            items += (
+                f'<div class="runner-item">'
+                f'<div class="runner-label">{label}</div>'
+                f'<div class="runner-ticker">{assets[i]}</div>'
+                f'<div class="runner-pct">{pred[i]*100:+.2f}%</div>'
+                f'</div>'
+            )
+    return f'<hr class="hero-divider"><div class="hero-runners">{items}</div>' if items else ""
+
+
+def render_html(html: str):
+    """Wrap HTML in a no-margin div to guarantee Streamlit renders it as HTML, not markdown."""
+    st.markdown(f'<div style="margin:0">{html}</div>', unsafe_allow_html=True)
 
 
 # ── App header ────────────────────────────────────────────────────────────────
@@ -527,12 +533,13 @@ for tab, module, assets, benchmark in [
                 model_full, sx_full, sy_full = load_model_and_scalers(module, mode='full')
 
             if model_full is None:
-                st.markdown("""
-                <div class="unavailable-card">
-                    <div class="unavailable-icon">◌</div>
-                    <div class="unavailable-title">Model not available</div>
-                    <div class="unavailable-sub">Train via GitHub Actions (train.yml)</div>
-                </div>""", unsafe_allow_html=True)
+                render_html(
+                    '<div class="unavailable-card">'
+                    '<div class="unavailable-icon">◌</div>'
+                    '<div class="unavailable-title">Model not available</div>'
+                    '<div class="unavailable-sub">Train via GitHub Actions (train.yml)</div>'
+                    '</div>'
+                )
             else:
                 pred      = get_prediction(model_full, sx_full, sy_full, feat_seq)
                 top_idx   = int(np.argmax(pred))
@@ -549,20 +556,23 @@ for tab, module, assets, benchmark in [
                 if switched and prev:
                     switch_html = f'<div class="switch-badge">⚠ Switched from {prev} · −12 bps applied</div>'
 
-                st.markdown(f"""
-                <div class="hero-card">
-                    <div class="hero-card-label">Full Dataset · 2008–2026 YTD</div>
-                    <div class="hero-ticker">{top_asset}</div>
-                    <div class="hero-return">{display_ret*100:+.2f}% predicted return</div>
-                    {switch_html}
-                    <div class="hero-meta">
-                        Signal for &nbsp;&nbsp;<strong>{next_day}</strong><br>
-                        Generated &nbsp;&nbsp;<strong>{now_str}</strong><br>
-                        Benchmark &nbsp;&nbsp;<strong>{benchmark}</strong>
-                    </div>
-                    {runners_html(assets, sorted_idx, pred)}
-                </div>
-                """, unsafe_allow_html=True)
+                meta = (
+                    f'<div class="hero-meta">'
+                    f'Signal for &nbsp;&nbsp;<strong>{next_day}</strong><br>'
+                    f'Generated &nbsp;&nbsp;<strong>{now_str}</strong><br>'
+                    f'Benchmark &nbsp;&nbsp;<strong>{benchmark}</strong>'
+                    f'</div>'
+                )
+                render_html(
+                    f'<div class="hero-card">'
+                    f'<div class="hero-card-label">Full Dataset · 2008–2026 YTD</div>'
+                    f'<div class="hero-ticker">{top_asset}</div>'
+                    f'<div class="hero-return">{display_ret*100:+.2f}% predicted return</div>'
+                    f'{switch_html}'
+                    f'{meta}'
+                    f'{runners_html(assets, sorted_idx, pred)}'
+                    f'</div>'
+                )
 
         # ── RIGHT card: Shrinking consensus ───────────────────────────────
         with col_cons:
@@ -570,30 +580,34 @@ for tab, module, assets, benchmark in [
                 cons_pred = get_shrinking_consensus(module, feat_seq)
 
             if cons_pred is None:
-                st.markdown("""
-                <div class="unavailable-card">
-                    <div class="unavailable-icon">◌</div>
-                    <div class="unavailable-title">Ensemble not available</div>
-                    <div class="unavailable-sub">Train via GitHub Actions (train_shrinking.yml)</div>
-                </div>""", unsafe_allow_html=True)
+                render_html(
+                    '<div class="unavailable-card">'
+                    '<div class="unavailable-icon">◌</div>'
+                    '<div class="unavailable-title">Ensemble not available</div>'
+                    '<div class="unavailable-sub">Train via GitHub Actions (train_shrinking.yml)</div>'
+                    '</div>'
+                )
             else:
                 top_idx_c   = int(np.argmax(cons_pred))
                 top_asset_c = assets[top_idx_c]
                 sorted_c    = np.argsort(cons_pred)[::-1]
 
-                st.markdown(f"""
-                <div class="hero-card consensus">
-                    <div class="hero-card-label">Shrinking Windows Ensemble</div>
-                    <div class="hero-ticker">{top_asset_c}</div>
-                    <div class="hero-return">{cons_pred[top_idx_c]*100:+.2f}% consensus return</div>
-                    <div class="hero-meta">
-                        Signal for &nbsp;&nbsp;<strong>{next_day}</strong><br>
-                        Generated &nbsp;&nbsp;<strong>{now_str}</strong><br>
-                        Benchmark &nbsp;&nbsp;<strong>{benchmark}</strong>
-                    </div>
-                    {runners_html(assets, sorted_c, cons_pred)}
-                </div>
-                """, unsafe_allow_html=True)
+                meta_c = (
+                    f'<div class="hero-meta">'
+                    f'Signal for &nbsp;&nbsp;<strong>{next_day}</strong><br>'
+                    f'Generated &nbsp;&nbsp;<strong>{now_str}</strong><br>'
+                    f'Benchmark &nbsp;&nbsp;<strong>{benchmark}</strong>'
+                    f'</div>'
+                )
+                render_html(
+                    f'<div class="hero-card consensus">'
+                    f'<div class="hero-card-label">Shrinking Windows Ensemble</div>'
+                    f'<div class="hero-ticker">{top_asset_c}</div>'
+                    f'<div class="hero-return">{cons_pred[top_idx_c]*100:+.2f}% consensus return</div>'
+                    f'{meta_c}'
+                    f'{runners_html(assets, sorted_c, cons_pred)}'
+                    f'</div>'
+                )
 
         # ── Performance metrics ───────────────────────────────────────────
         st.markdown('<div class="section-heading">Performance Metrics · Test Period</div>', unsafe_allow_html=True)
@@ -603,26 +617,18 @@ for tab, module, assets, benchmark in [
             ann_ret, sharpe, max_dd, hit = compute_metrics(
                 metrics_data['test_predictions'], metrics_data['test_true']
             )
-            st.markdown(f"""
-            <div class="metrics-grid">
-                <div class="metric-cell">
-                    <div class="metric-name">Ann. Return</div>
-                    <div class="metric-value {'positive' if ann_ret>=0 else 'negative'}">{ann_ret:+.1f}%</div>
-                </div>
-                <div class="metric-cell">
-                    <div class="metric-name">Sharpe Ratio</div>
-                    <div class="metric-value {'positive' if sharpe>=0 else 'negative'}">{sharpe:.2f}</div>
-                </div>
-                <div class="metric-cell">
-                    <div class="metric-name">Max Drawdown</div>
-                    <div class="metric-value negative">{max_dd:.1f}%</div>
-                </div>
-                <div class="metric-cell">
-                    <div class="metric-name">Hit Rate</div>
-                    <div class="metric-value {'positive' if hit>=50 else 'negative'}">{hit:.1f}%</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            render_html(
+                f'<div class="metrics-grid">'
+                f'<div class="metric-cell"><div class="metric-name">Ann. Return</div>'
+                f'<div class="metric-value {"positive" if ann_ret>=0 else "negative"}">{ann_ret:+.1f}%</div></div>'
+                f'<div class="metric-cell"><div class="metric-name">Sharpe Ratio</div>'
+                f'<div class="metric-value {"positive" if sharpe>=0 else "negative"}">{sharpe:.2f}</div></div>'
+                f'<div class="metric-cell"><div class="metric-name">Max Drawdown</div>'
+                f'<div class="metric-value negative">{max_dd:.1f}%</div></div>'
+                f'<div class="metric-cell"><div class="metric-name">Hit Rate</div>'
+                f'<div class="metric-value {"positive" if hit>=50 else "negative"}">{hit:.1f}%</div></div>'
+                f'</div>'
+            )
         else:
             st.markdown(
                 '<p style="font-family:JetBrains Mono,monospace;font-size:0.72rem;'
