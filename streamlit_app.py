@@ -20,15 +20,15 @@ TRANSACTION_COST = 0.0012
 SEQ_LEN = 20
 HF_REPO = "P2SAMAPA/p2-etf-kan-engine-results"
 
-# Get HF token from secrets (required for authentication even for public datasets sometimes)
-HF_TOKEN = None
+# Get HF token from secrets
 try:
     HF_TOKEN = st.secrets["HF_TOKEN"]
 except:
     HF_TOKEN = os.environ.get("HF_TOKEN", None)
 
-if HF_TOKEN is None:
-    st.warning("HF_TOKEN not found. Set it in secrets for reliable downloads.")
+if not HF_TOKEN:
+    st.error("HF_TOKEN not found in secrets. Please add it.")
+    st.stop()
 
 # Session state
 if 'prev_pick_fi' not in st.session_state:
@@ -77,7 +77,7 @@ def build_feature_sequence(df, module):
     return features.iloc[-SEQ_LEN:].values
 
 def download_file(filename, subfolder=""):
-    """Download a file from HF dataset using token."""
+    """Download a file using huggingface_hub with token."""
     local_dir = "models"
     os.makedirs(local_dir, exist_ok=True)
     try:
@@ -92,7 +92,7 @@ def download_file(filename, subfolder=""):
         )
         return path
     except Exception as e:
-        st.warning(f"Could not download {filename}: {e}")
+        st.error(f"Download failed for {filename}: {e}")
         return None
 
 def load_model_and_scalers(module, mode='full', start_year=None):
