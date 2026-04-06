@@ -8,7 +8,7 @@ import pandas_market_calendars as mcal
 from datasets import load_dataset
 from kan_model import TemporalKANForecaster
 import os
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download, list_repo_files, HfApi
 
 # Constants
 FI_ASSETS = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
@@ -20,14 +20,47 @@ TRANSACTION_COST = 0.0012
 SEQ_LEN = 20
 HF_REPO = "P2SAMAPA/p2-etf-kan-engine-results"
 
-# Get HF token from secrets
-try:
-    HF_TOKEN = st.secrets["HF_TOKEN"]
-except:
-    HF_TOKEN = os.environ.get("HF_TOKEN", None)
+# Get HF token from secrets or environment
+def get_hf_token():
+    """Get HuggingFace token from Streamlit secrets or environment."""
+    # Try Streamlit secrets first
+    try:
+        if hasattr(st, 'secrets') and "HF_TOKEN" in st.secrets:
+            return st.secrets["HF_TOKEN"]
+    except:
+        pass
+
+    # Fall back to environment variable
+    return os.environ.get("HF_TOKEN", None)
+
+HF_TOKEN = get_hf_token()
 
 if not HF_TOKEN:
-    st.error("HF_TOKEN not found in secrets. Please add it.")
+    st.error("HF_TOKEN not found. Please add it to your Streamlit secrets (.streamlit/secrets.toml) or set HF_TOKEN environment variable.")
+    st.stop()
+
+# Validate token by testing API access
+def validate_hf_token(token):
+    """Validate the HF token has access to the repository."""
+    try:
+        api = HfApi()
+        api.list_repo_files(repo_id=HF_REPO, repo_type="dataset", token=token)
+        return True, None
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg or "unauthorized" in error_msg.lower():
+            return False, "Invalid or expired HF_TOKEN. Please check your token at https://huggingface.co/settings/tokens"
+        elif "403" in error_msg or "forbidden" in error_msg.lower():
+            return False, "Access denied. Your token may not have permission to access this repository."
+        elif "404" in error_msg:
+            return False, "Repository not found or is private. Please ensure the repository exists and your token has access."
+        else:
+            return False, f"Token validation failed: {error_msg}"
+
+token_valid, token_error = validate_hf_token(HF_TOKEN)
+if not token_valid:
+    st.error(f"HuggingFace Authentication Error: {token_error}")
+    st.info("To fix this: 1) Go to https://huggingface.co/settings/tokens 2) Create a new token with 'Read' permissions 3) Add it to your Streamlit secrets")
     st.stop()
 
 # Session state
@@ -76,24 +109,36 @@ def build_feature_sequence(df, module):
         return None
     return features.iloc[-SEQ_LEN:].values
 
-def download_file(filename, subfolder=""):
-    """Download a file using huggingface_hub with token."""
+def download_file(filename, subfolder="", max_retries=3):
+    """Download a file using huggingface_hub with token and retry logic."""
     local_dir = "models"
     os.makedirs(local_dir, exist_ok=True)
-    try:
-        path = hf_hub_download(
-            repo_id=HF_REPO,
-            filename=filename,
-            subfolder=subfolder,
-            repo_type="dataset",
-            local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            token=HF_TOKEN
-        )
-        return path
-    except Exception as e:
-        st.error(f"Download failed for {filename}: {e}")
-        return None
+
+    # Full path for logging
+    full_path = f"{HF_REPO}/{subfolder}/{filename}" if subfolder else f"{HF_REPO}/{filename}"
+
+    for attempt in range(max_retries):
+        try:
+            path = hf_hub_download(
+                repo_id=HF_REPO,
+                filename=filename,
+                subfolder=subfolder if subfolder else None,
+                repo_type="dataset",
+                local_dir=local_dir,
+                local_dir_use_symlinks=False,
+                token=HF_TOKEN
+            )
+            return path
+        except Exception as e:
+            error_msg = str(e)
+            if attempt < max_retries - 1:
+                # Retry on transient errors
+                if "connection" in error_msg.lower() or "timeout" in error_msg.lower() or "429" in error_msg:
+                    continue
+            st.error(f"Download failed for {filename}: {e}")
+            return None
+
+    return None
 
 def load_model_and_scalers(module, mode='full', start_year=None):
     if mode == 'full':
@@ -170,6 +215,7 @@ def get_shrinking_consensus(module, feature_seq):
         pattern = f"shrinking_models/kan_{module}_shrinking_start"
         model_files = [f for f in files if f.startswith(pattern) and f.endswith(".pt")]
         if not model_files:
+            st.info(f"No shrinking models found for {module} module in the repository.")
             return None
     except Exception as e:
         st.warning(f"Could not list shrinking models: {e}")
@@ -183,8 +229,11 @@ def get_shrinking_consensus(module, feature_seq):
             continue
         pred = get_prediction(model, scaler_X, scaler_y, feature_seq)
         preds.append(pred)
+
     if not preds:
+        st.info(f"Successfully found {len(model_files)} shrinking models but failed to load any of them.")
         return None
+
     return np.mean(preds, axis=0)
 
 # -------------------------------------------------------------------
