@@ -3,13 +3,12 @@ import pandas as pd
 import numpy as np
 import torch
 import joblib
-import requests
 from datetime import datetime, timedelta
 import pandas_market_calendars as mcal
 from datasets import load_dataset
 from kan_model import TemporalKANForecaster
 import os
-import io
+from huggingface_hub import hf_hub_download, list_repo_files
 
 # Constants
 FI_ASSETS = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
@@ -20,7 +19,16 @@ MACRO_COLS = ['VIX', 'DXY', 'T10Y2Y', 'TBILL_3M', 'IG_SPREAD', 'HY_SPREAD']
 TRANSACTION_COST = 0.0012
 SEQ_LEN = 20
 HF_REPO = "P2SAMAPA/p2-etf-kan-engine-results"
-BASE_URL = f"https://huggingface.co/datasets/{HF_REPO}/resolve/main"
+
+# Get HF token from secrets (required for authentication even for public datasets sometimes)
+HF_TOKEN = None
+try:
+    HF_TOKEN = st.secrets["HF_TOKEN"]
+except:
+    HF_TOKEN = os.environ.get("HF_TOKEN", None)
+
+if HF_TOKEN is None:
+    st.warning("HF_TOKEN not found. Set it in secrets for reliable downloads.")
 
 # Session state
 if 'prev_pick_fi' not in st.session_state:
@@ -68,22 +76,24 @@ def build_feature_sequence(df, module):
         return None
     return features.iloc[-SEQ_LEN:].values
 
-def download_file(url, local_path):
-    """Download a file from a URL to local path if not already cached."""
-    if os.path.exists(local_path):
-        return True
+def download_file(filename, subfolder=""):
+    """Download a file from HF dataset using token."""
+    local_dir = "models"
+    os.makedirs(local_dir, exist_ok=True)
     try:
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        resp = requests.get(url, stream=True)
-        resp.raise_for_status()
-        with open(local_path, 'wb') as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-        st.info(f"✅ Downloaded {os.path.basename(local_path)}")
-        return True
+        path = hf_hub_download(
+            repo_id=HF_REPO,
+            filename=filename,
+            subfolder=subfolder,
+            repo_type="dataset",
+            local_dir=local_dir,
+            local_dir_use_symlinks=False,
+            token=HF_TOKEN
+        )
+        return path
     except Exception as e:
-        st.warning(f"⚠️ Failed to download {url}: {e}")
-        return False
+        st.warning(f"Could not download {filename}: {e}")
+        return None
 
 def load_model_and_scalers(module, mode='full', start_year=None):
     if mode == 'full':
@@ -97,28 +107,21 @@ def load_model_and_scalers(module, mode='full', start_year=None):
         scaler_y_file = f"scaler_y_{module}_shrinking_start{start_year}.pkl"
         subfolder = "shrinking_models"
 
-    local_model = f"models/{model_file}"
-    local_scaler_x = f"models/{scaler_x_file}"
-    local_scaler_y = f"models/{scaler_y_file}"
+    model_path = download_file(model_file, subfolder)
+    scaler_x_path = download_file(scaler_x_file, subfolder)
+    scaler_y_path = download_file(scaler_y_file, subfolder)
 
-    url_model = f"{BASE_URL}/{subfolder}/{model_file}" if subfolder else f"{BASE_URL}/{model_file}"
-    url_scaler_x = f"{BASE_URL}/{subfolder}/{scaler_x_file}" if subfolder else f"{BASE_URL}/{scaler_x_file}"
-    url_scaler_y = f"{BASE_URL}/{subfolder}/{scaler_y_file}" if subfolder else f"{BASE_URL}/{scaler_y_file}"
-
-    if not (download_file(url_model, local_model) and
-            download_file(url_scaler_x, local_scaler_x) and
-            download_file(url_scaler_y, local_scaler_y)):
+    if not (model_path and scaler_x_path and scaler_y_path):
         return None, None, None
 
-    scaler_X = joblib.load(local_scaler_x)
-    scaler_y = joblib.load(local_scaler_y)
+    scaler_X = joblib.load(scaler_x_path)
+    scaler_y = joblib.load(scaler_y_path)
     n_features = scaler_X.mean_.shape[0]
     input_dim = SEQ_LEN * n_features
     output_dim = len(FI_ASSETS) if module == 'fi' else len(EQUITY_ASSETS)
-    # Architecture must match training: hidden_dims=[256,128], grid_size=20
     model = TemporalKANForecaster(input_dim, hidden_dims=[256,128], output_dim=output_dim, grid_size=20)
     try:
-        model.load_state_dict(torch.load(local_model, map_location='cpu'))
+        model.load_state_dict(torch.load(model_path, map_location='cpu'))
     except Exception as e:
         st.error(f"Model mismatch: {e}")
         return None, None, None
@@ -140,10 +143,9 @@ def apply_transaction_cost(prev_pick, new_pick, gross_return):
 
 def load_metrics(module):
     fname = f"metrics_{module}_full.pkl"
-    local = f"models/{fname}"
-    url = f"{BASE_URL}/{fname}"
-    if download_file(url, local):
-        return joblib.load(local)
+    path = download_file(fname, "")
+    if path:
+        return joblib.load(path)
     return None
 
 def compute_metrics(test_pred, test_true):
@@ -162,15 +164,11 @@ def compute_metrics(test_pred, test_true):
     return ann_return, sharpe, max_dd, hit
 
 def get_shrinking_consensus(module, feature_seq):
-    """List all shrinking model files via Hugging Face API and aggregate predictions."""
-    # We'll need to list files in the dataset. Since we don't have an API key, we can use the HF API without token for public datasets.
+    """Load all shrinking models and average predictions."""
     try:
-        api_url = f"https://huggingface.co/api/datasets/{HF_REPO}/tree/main/shrinking_models"
-        resp = requests.get(api_url)
-        if resp.status_code != 200:
-            return None
-        files = resp.json()
-        model_files = [f['path'] for f in files if f['type'] == 'file' and f['path'].startswith("shrinking_models/kan_{module}_shrinking_start") and f['path'].endswith(".pt")]
+        files = list_repo_files(HF_REPO, repo_type="dataset", token=HF_TOKEN)
+        pattern = f"shrinking_models/kan_{module}_shrinking_start"
+        model_files = [f for f in files if f.startswith(pattern) and f.endswith(".pt")]
         if not model_files:
             return None
     except Exception as e:
@@ -179,8 +177,7 @@ def get_shrinking_consensus(module, feature_seq):
 
     preds = []
     for mf in model_files:
-        base = os.path.basename(mf)
-        start_year = int(base.split("_start")[-1].split(".pt")[0])
+        start_year = int(mf.split("_start")[-1].split(".pt")[0])
         model, scaler_X, scaler_y = load_model_and_scalers(module, mode='shrinking', start_year=start_year)
         if model is None:
             continue
@@ -214,7 +211,7 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
             st.warning(f"Insufficient data for {module}.")
             continue
 
-        # --- Full dataset model prediction (hero box) ---
+        # --- Full dataset model ---
         model_full, scaler_X_full, scaler_y_full = load_model_and_scalers(module, mode='full')
         if model_full is None:
             st.warning(f"Full model for {module} not available. Train via GitHub Actions.")
@@ -247,7 +244,7 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
                 for m in MACRO_COLS:
                     st.metric(m, f"{latest_macro.get(m, 0):.2f}")
 
-        # --- Shrinking window consensus (ensemble) ---
+        # --- Shrinking consensus ---
         with st.expander("Show Ensemble Prediction (Shrinking Windows Consensus)"):
             consensus_pred = get_shrinking_consensus(module, feat_seq)
             if consensus_pred is None:
@@ -263,7 +260,7 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
                 if len(sorted_idx_cons) > 2:
                     st.write(f"3rd: {assets[sorted_idx_cons[2]]} ({consensus_pred[sorted_idx_cons[2]]*100:.1f}%)")
 
-        # --- Real metrics from test set ---
+        # --- Metrics ---
         metrics_data = load_metrics(module)
         if metrics_data is not None:
             test_pred = np.array(metrics_data['test_predictions'])
@@ -278,6 +275,7 @@ for tab, module, assets, benchmark in [(tab_fi, 'fi', FI_ASSETS, FI_BENCHMARK),
         else:
             st.warning("Metrics not available yet.")
 
+        # --- Signal History ---
         st.markdown("### Signal History")
         if st.session_state.signal_history:
             hist_df = pd.DataFrame(st.session_state.signal_history, columns=["Date","Pick","Conviction","Actual Return","Hit"])
