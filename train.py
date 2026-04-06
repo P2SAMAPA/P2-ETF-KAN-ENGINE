@@ -57,7 +57,7 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=1e-3, patience
     X_train_raw, y_train_raw = X[:train_end], y[:train_end]
     X_val_raw, y_val_raw = X[train_end:val_end], y[train_end:val_end]
     X_test_raw, y_test_raw = X[val_end:], y[val_end:]
-    
+
     train_flat = X_train_raw.reshape(-1, X_train_raw.shape[-1])
     val_flat = X_val_raw.reshape(-1, X_val_raw.shape[-1])
     test_flat = X_test_raw.reshape(-1, X_test_raw.shape[-1])
@@ -66,28 +66,32 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=1e-3, patience
     X_train_scaled = scaler_X.transform(train_flat).reshape(X_train_raw.shape)
     X_val_scaled = scaler_X.transform(val_flat).reshape(X_val_raw.shape)
     X_test_scaled = scaler_X.transform(test_flat).reshape(X_test_raw.shape)
-    
+
     scaler_y = StandardScaler()
     scaler_y.fit(y_train_raw)
     y_train_scaled = scaler_y.transform(y_train_raw)
     y_val_scaled = scaler_y.transform(y_val_raw)
     y_test_scaled = scaler_y.transform(y_test_raw)
-    
+
     X_train_t = torch.FloatTensor(X_train_scaled)
     y_train_t = torch.FloatTensor(y_train_scaled)
     X_val_t = torch.FloatTensor(X_val_scaled)
     y_val_t = torch.FloatTensor(y_val_scaled)
     X_test_t = torch.FloatTensor(X_test_scaled)
-    
+
     train_dataset = TensorDataset(X_train_t, y_train_t)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    
+
     input_dim = seq_len * X_train_scaled.shape[-1]
-    model = TemporalKANForecaster(input_dim, hidden_dims=[256,128], output_dim=len(assets), grid_size=20)
+    model = TemporalKANForecaster(input_dim, hidden_dims=[256,128], output_dim=len(assets), grid_size=20, seq_len=seq_len)
+    
+    # Initialize KAN grids with a sample of training data
+    model.init_grids(X_train_t[:min(2048, len(X_train_t))])
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    loss_fn = nn.MSELoss()   # MSE may help increase prediction variance
-    
+    loss_fn = nn.MSELoss() # MSE may help increase prediction variance
+
     best_val_loss = float('inf')
     best_epoch = 0
     epochs_no_improve = 0
@@ -130,7 +134,7 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=1e-3, patience
     model.eval()
     with torch.no_grad():
         test_pred_scaled = model(X_test_t).numpy()
-    test_pred = scaler_y.inverse_transform(test_pred_scaled)
+        test_pred = scaler_y.inverse_transform(test_pred_scaled)
     results = {
         'test_predictions': test_pred.tolist(),
         'test_true': scaler_y.inverse_transform(y_test_scaled).tolist(),
@@ -153,15 +157,15 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
     X, y, feat_names, target_names = create_features_and_targets(df, assets, seq_len)
     n = len(X)
     if n < 100:
-        print(f"  -> Not enough samples ({n}), skipping.")
+        print(f" -> Not enough samples ({n}), skipping.")
         return
-    print(f"  Total samples: {n}")
+    print(f" Total samples: {n}")
     train_end = int(0.8 * n)
     val_end = int(0.9 * n)
     X_train_raw, y_train_raw = X[:train_end], y[:train_end]
     X_val_raw, y_val_raw = X[train_end:val_end], y[train_end:val_end]
     X_test_raw, y_test_raw = X[val_end:], y[val_end:]
-    
+
     train_flat = X_train_raw.reshape(-1, X_train_raw.shape[-1])
     val_flat = X_val_raw.reshape(-1, X_val_raw.shape[-1])
     test_flat = X_test_raw.reshape(-1, X_test_raw.shape[-1])
@@ -170,28 +174,32 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
     X_train_scaled = scaler_X.transform(train_flat).reshape(X_train_raw.shape)
     X_val_scaled = scaler_X.transform(val_flat).reshape(X_val_raw.shape)
     X_test_scaled = scaler_X.transform(test_flat).reshape(X_test_raw.shape)
-    
+
     scaler_y = StandardScaler()
     scaler_y.fit(y_train_raw)
     y_train_scaled = scaler_y.transform(y_train_raw)
     y_val_scaled = scaler_y.transform(y_val_raw)
     y_test_scaled = scaler_y.transform(y_test_raw)
-    
+
     X_train_t = torch.FloatTensor(X_train_scaled)
     y_train_t = torch.FloatTensor(y_train_scaled)
     X_val_t = torch.FloatTensor(X_val_scaled)
     y_val_t = torch.FloatTensor(y_val_scaled)
     X_test_t = torch.FloatTensor(X_test_scaled)
-    
+
     train_dataset = TensorDataset(X_train_t, y_train_t)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    
+
     input_dim = seq_len * X_train_scaled.shape[-1]
-    model = TemporalKANForecaster(input_dim, hidden_dims=[256,128], output_dim=len(assets), grid_size=20)
+    model = TemporalKANForecaster(input_dim, hidden_dims=[256,128], output_dim=len(assets), grid_size=20, seq_len=seq_len)
+    
+    # Initialize KAN grids with a sample of training data
+    model.init_grids(X_train_t[:min(2048, len(X_train_t))])
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     loss_fn = nn.MSELoss()
-    
+
     best_val_loss = float('inf')
     best_epoch = 0
     epochs_no_improve = 0
@@ -214,7 +222,7 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
             pred_var = pred_sample.var().item()
         scheduler.step()
         if (epoch+1) % 20 == 0:
-            print(f"  Epoch {epoch+1:3d}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f} | Pred Var: {pred_var:.6f}")
+            print(f" Epoch {epoch+1:3d}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f} | Pred Var: {pred_var:.6f}")
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
@@ -224,7 +232,7 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                print(f"  Early stopping at epoch {epoch+1}")
+                print(f" Early stopping at epoch {epoch+1}")
                 break
     os.makedirs('models', exist_ok=True)
     joblib.dump(scaler_X, f'models/scaler_X_{module}_shrinking_start{start_year}.pkl')
@@ -233,7 +241,7 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
     model.eval()
     with torch.no_grad():
         test_pred_scaled = model(X_test_t).numpy()
-    test_pred = scaler_y.inverse_transform(test_pred_scaled)
+        test_pred = scaler_y.inverse_transform(test_pred_scaled)
     results = {
         'start_year': start_year,
         'test_predictions': test_pred.tolist(),
@@ -244,7 +252,7 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
         'best_epoch': best_epoch
     }
     joblib.dump(results, f'metrics_{module}_shrinking_start{start_year}.pkl')
-    print(f"  -> Done. Best val loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
+    print(f" -> Done. Best val loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
