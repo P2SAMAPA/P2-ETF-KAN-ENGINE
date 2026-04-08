@@ -1,4 +1,3 @@
-
 import os
 import argparse
 import numpy as np
@@ -16,18 +15,46 @@ EQUITY_ASSETS = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 
 MACRO_COLS = ['VIX', 'DXY', 'T10Y2Y', 'TBILL_3M', 'IG_SPREAD', 'HY_SPREAD']
 
 def load_raw_data():
+    print("Loading raw data...")
     ds = load_dataset("P2SAMAPA/fi-etf-macro-signal-master-data", split="train")
     df = ds.to_pandas()
-    df['date'] = pd.to_datetime(df['__index_level_0__'], unit='s')
+
+    # Robust date parsing: handle both Timestamp objects and string representations
+    idx_col = '__index_level_0__'
+    sample_val = df[idx_col].iloc[0]
+
+    # Check if already a Timestamp (newer datasets library format)
+    if isinstance(sample_val, pd.Timestamp):
+        df['date'] = df[idx_col]
+    elif isinstance(sample_val, str):
+        # Try ISO format first
+        try:
+            df['date'] = pd.to_datetime(df[idx_col])
+        except Exception:
+            # Try UNIX timestamp format as fallback
+            df['date'] = pd.to_datetime(df[idx_col], unit='s')
+    else:
+        # For other types (int, float representing UNIX timestamps)
+        try:
+            df['date'] = pd.to_datetime(df[idx_col], unit='s')
+        except Exception:
+            df['date'] = pd.to_datetime(df[idx_col])
+
     df.set_index('date', inplace=True)
-    df.drop('__index_level_0__', axis=1, inplace=True)
+    df.drop(idx_col, axis=1, inplace=True)
     df.sort_index(inplace=True)
+
     all_cols = FI_ASSETS + EQUITY_ASSETS + MACRO_COLS
     for col in all_cols:
         if col not in df.columns:
             df[col] = np.nan
     df.ffill(inplace=True)
     df.dropna(inplace=True)
+
+    if len(df) == 0:
+        raise ValueError("Dataset is empty after preprocessing. Check if the HuggingFace dataset is available and contains valid data.")
+
+    print(f"Loaded {len(df)} rows from {df.index.min()} to {df.index.max()}")
     return df
 
 def create_features_and_targets(df, assets, seq_len=20):
@@ -46,11 +73,16 @@ def create_features_and_targets(df, assets, seq_len=20):
     return np.array(X_seq), np.array(y_seq), features.columns.tolist(), assets
 
 def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience=80):
-    print("Loading raw data...")
     df = load_raw_data()
     assets = FI_ASSETS if module == 'fi' else EQUITY_ASSETS
     X, y, feat_names, target_names = create_features_and_targets(df, assets, seq_len)
     n = len(X)
+
+    if n == 0:
+        raise ValueError(f"No training samples generated for {module} module. "
+                        f"Dataset has {len(df)} rows after preprocessing. "
+                        "This may indicate empty data or date parsing issues.")
+
     print(f"Total samples: {n}")
     print(f"y mean: {y.mean():.6f}, y std: {y.std():.6f}")
     train_end = int(0.8 * n)
@@ -79,7 +111,6 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
     X_val_t = torch.FloatTensor(X_val_scaled)
     y_val_t = torch.FloatTensor(y_val_scaled)
     X_test_t = torch.FloatTensor(X_test_scaled)
-
     train_dataset = TensorDataset(X_train_t, y_train_t)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
@@ -178,6 +209,10 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
     assets = FI_ASSETS if module == 'fi' else EQUITY_ASSETS
     X, y, feat_names, target_names = create_features_and_targets(df, assets, seq_len)
     n = len(X)
+    if n == 0:
+        raise ValueError(f"No training samples generated for {module} module starting from {start_year}. "
+                        f"Dataset has {len(df)} rows after filtering. "
+                        "This may indicate insufficient data for the selected time window.")
     if n < 100:
         print(f" -> Not enough samples ({n}), skipping.")
         return
@@ -208,7 +243,6 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
     X_val_t = torch.FloatTensor(X_val_scaled)
     y_val_t = torch.FloatTensor(y_val_scaled)
     X_test_t = torch.FloatTensor(X_test_scaled)
-
     train_dataset = TensorDataset(X_train_t, y_train_t)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
