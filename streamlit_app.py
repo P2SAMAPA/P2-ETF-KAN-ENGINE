@@ -13,14 +13,14 @@ from huggingface_hub import hf_hub_download, list_repo_files
 # ── Constants ────────────────────────────────────────────────────────────────
 FI_ASSETS     = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
 FI_BENCHMARK  = 'AGG'
-EQUITY_ASSETS = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XME', 'GDX', "IWF", "XSD", "XBI", 'IWM']
+EQUITY_ASSETS = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XME', "IWF", "XSD", "XBI", 'GDX', 'IWM']
 EQUITY_BENCHMARK = 'SPY'
 MACRO_COLS    = ['VIX', 'DXY', 'T10Y2Y', 'TBILL_3M', 'IG_SPREAD', 'HY_SPREAD']
 
 TRANSACTION_COST   = 0.0012
 SEQ_LEN            = 20
 HF_REPO            = "P2SAMAPA/p2-etf-kan-engine-results"
-HF_REPO_TYPE       = "dataset"   # ← repo_type used everywhere for this repo
+HF_REPO_TYPE       = "model"   # ← repo_type used everywhere for this repo
 RISK_FREE_RATE     = 0.05
 MAX_SHARPE_FOR_WEIGHT = 3.0
 
