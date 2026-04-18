@@ -11,7 +11,7 @@ from kan_model import TemporalKANForecaster
 import joblib
 
 FI_ASSETS     = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
-EQUITY_ASSETS = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XME', 'GDX', "IWF", "XSD", "XBI", 'IWM']
+EQUITY_ASSETS = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XME', 'IWF', 'XSD', 'XBI', 'GDX', 'IWM']
 MACRO_COLS    = ['VIX', 'DXY', 'T10Y2Y', 'TBILL_3M', 'IG_SPREAD', 'HY_SPREAD']
 
 
@@ -153,7 +153,7 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
             optimizer.zero_grad()
             pred      = model(batch_X)
             mse_loss  = loss_fn(pred, batch_y)
-            var_bonus = -0.1 * pred.var()
+            var_bonus = -0.5 * pred.var()
             loss      = mse_loss + var_bonus
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -300,7 +300,7 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
             optimizer.zero_grad()
             pred      = model(batch_X)
             mse_loss  = loss_fn(pred, batch_y)
-            var_bonus = -0.1 * pred.var()
+            var_bonus = -0.5 * pred.var()
             loss      = mse_loss + var_bonus
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
