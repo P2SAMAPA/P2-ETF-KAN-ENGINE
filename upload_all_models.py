@@ -23,7 +23,7 @@ from huggingface_hub import HfApi, create_repo
 
 
 HF_REPO      = "P2SAMAPA/p2-etf-kan-engine-results"
-REPO_TYPE    = "dataset"   # ← must match what streamlit_app.py downloads from
+REPO_TYPE    = "model"   # ← must match what streamlit_app.py downloads from
 
 
 def upload_with_retry(folder_path, repo_name, path_in_repo, token, max_retries=5):
