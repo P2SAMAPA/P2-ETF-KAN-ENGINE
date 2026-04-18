@@ -12,32 +12,40 @@ jobs:
   train-full:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-    - name: Cache pip
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-    - name: Install dependencies
-      run: pip install -r requirements.txt
-    - name: Train FI module
-      run: python train.py --mode full --module fi --epochs 150
-    - name: Train Equity module
-      run: python train.py --mode full --module equity --epochs 150
-    - name: Upload all models to HF (single commit with retry)
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: python upload_all_models.py
-      continue-on-error: true   # Don't fail the workflow if upload fails (artifacts still saved)
-    - name: Upload artifacts to GitHub (backup)
-      uses: actions/upload-artifact@v4
-      with:
-        name: trained-models-full
-        path: |
-          models/
-          metrics_*.pkl
-        retention-days: 7
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train FI module
+        run: python train.py --mode full --module fi --epochs 150
+
+      - name: Train Equity module
+        run: python train.py --mode full --module equity --epochs 150
+
+      - name: Upload all models to HF dataset repo
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python upload_all_models.py
+        # No continue-on-error — a failed upload should be visible as a red step
+
+      - name: Upload artifacts to GitHub (backup)
+        if: always()   # save artifacts even if HF upload failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-models-full
+          path: |
+            models/
+            metrics_*.pkl
+          retention-days: 7
