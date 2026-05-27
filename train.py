@@ -5,56 +5,91 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from datasets import load_dataset
 from sklearn.preprocessing import StandardScaler
 from kan_model import TemporalKANForecaster
 import joblib
 
 FI_ASSETS     = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
-EQUITY_ASSETS = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XME', 'IWF', 'XSD', 'XBI', 'GDX', 'IWM']
+EQUITY_ASSETS = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY',
+                 'XLP', 'XLU', 'XME', 'GDX', 'IWF', 'XSD', 'XBI', 'IWM']
 MACRO_COLS    = ['VIX', 'DXY', 'T10Y2Y', 'TBILL_3M', 'IG_SPREAD', 'HY_SPREAD']
+
+# All columns that must be non-NaN for a row to be usable
+REQUIRED_COLS = FI_ASSETS + EQUITY_ASSETS + MACRO_COLS
 
 
 def load_raw_data():
     print("Loading raw data...")
-    ds = load_dataset("P2SAMAPA/fi-etf-macro-signal-master-data", split="train")
-    df = ds.to_pandas()
 
-    idx_col    = '__index_level_0__'
-    sample_val = df[idx_col].iloc[0]
+    # FIX 1: Use hf_hub_download + pd.read_parquet instead of load_dataset.
+    # load_dataset tries to auto-convert all 403 columns and then dropna() on
+    # ALL columns wipes every row because options columns are NaN for history.
+    # hf_hub_download loads the raw parquet directly — fast and reliable.
+    hf_token = os.environ.get("HF_TOKEN")
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id="P2SAMAPA/fi-etf-macro-signal-master-data",
+            filename="master_data.parquet",
+            repo_type="dataset",
+            token=hf_token,
+        )
+        df = pd.read_parquet(path)
+    except Exception as e:
+        # Fallback: try load_dataset if hf_hub_download fails
+        print(f"  hf_hub_download failed ({e}), falling back to load_dataset...")
+        from datasets import load_dataset
+        ds = load_dataset("P2SAMAPA/fi-etf-macro-signal-master-data", split="train")
+        df = ds.to_pandas()
 
-    if isinstance(sample_val, pd.Timestamp):
-        df['date'] = df[idx_col]
-    elif isinstance(sample_val, str):
-        try:
-            df['date'] = pd.to_datetime(df[idx_col])
-        except Exception:
-            df['date'] = pd.to_datetime(df[idx_col], unit='s')
-    else:
-        try:
-            df['date'] = pd.to_datetime(df[idx_col], unit='s')
-        except Exception:
-            df['date'] = pd.to_datetime(df[idx_col])
+    # Normalise index to DatetimeIndex
+    # The parquet may have the date as the index or as '__index_level_0__'
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df.set_index("date", inplace=True)
+    elif "__index_level_0__" in df.columns:
+        idx_col   = "__index_level_0__"
+        sample    = df[idx_col].iloc[0]
+        if isinstance(sample, pd.Timestamp):
+            df["date"] = df[idx_col]
+        elif isinstance(sample, str):
+            try:
+                df["date"] = pd.to_datetime(df[idx_col])
+            except Exception:
+                df["date"] = pd.to_datetime(df[idx_col], unit="s")
+        else:
+            try:
+                df["date"] = pd.to_datetime(df[idx_col], unit="s")
+            except Exception:
+                df["date"] = pd.to_datetime(df[idx_col])
+        df.set_index("date", inplace=True)
+        df.drop(idx_col, axis=1, inplace=True)
 
-    df.set_index('date', inplace=True)
-    df.drop(idx_col, axis=1, inplace=True)
+    df.index = pd.to_datetime(df.index)
     df.sort_index(inplace=True)
 
-    all_cols = FI_ASSETS + EQUITY_ASSETS + MACRO_COLS
-    for col in all_cols:
+    # Ensure required columns exist (add NaN if missing for any reason)
+    for col in REQUIRED_COLS:
         if col not in df.columns:
             df[col] = np.nan
 
-    df.ffill(inplace=True)
-    df.dropna(inplace=True)
+    # FIX 2: Only forward-fill and dropna on REQUIRED columns.
+    # The master data now has 403 columns — many (options signals) are NaN
+    # for all historical rows. Calling df.dropna() on all columns eliminates
+    # every row. We only need the price + macro columns to be non-NaN.
+    df[REQUIRED_COLS] = df[REQUIRED_COLS].ffill()
+    df = df.dropna(subset=REQUIRED_COLS)
 
     if len(df) == 0:
         raise ValueError(
             "Dataset is empty after preprocessing. "
-            "Check if the HuggingFace dataset is available and contains valid data."
+            f"Checked {len(REQUIRED_COLS)} required columns: {REQUIRED_COLS}. "
+            "Verify that the HuggingFace dataset contains these columns with valid data."
         )
 
-    print(f"Loaded {len(df)} rows from {df.index.min()} to {df.index.max()}")
+    print(f"Loaded {len(df)} rows from {df.index.min().date()} to {df.index.max().date()}")
+    print(f"Total columns in master data: {len(df.columns)} "
+          f"(using {len(REQUIRED_COLS)} required columns for training)")
     return df
 
 
@@ -88,8 +123,7 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
     if n == 0:
         raise ValueError(
             f"No training samples generated for {module} module. "
-            f"Dataset has {len(df)} rows after preprocessing. "
-            "This may indicate empty data or date parsing issues."
+            f"Dataset has {len(df)} rows after preprocessing."
         )
 
     print(f"Total samples: {n}")
@@ -98,9 +132,9 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
     train_end = int(0.8 * n)
     val_end   = int(0.9 * n)
 
-    X_train_raw, y_train_raw = X[:train_end],        y[:train_end]
-    X_val_raw,   y_val_raw   = X[train_end:val_end], y[train_end:val_end]
-    X_test_raw,  y_test_raw  = X[val_end:],          y[val_end:]
+    X_train_raw, y_train_raw = X[:train_end],          y[:train_end]
+    X_val_raw,   y_val_raw   = X[train_end:val_end],   y[train_end:val_end]
+    X_test_raw,  y_test_raw  = X[val_end:],            y[val_end:]
 
     train_flat = X_train_raw.reshape(-1, X_train_raw.shape[-1])
     val_flat   = X_val_raw.reshape(-1,   X_val_raw.shape[-1])
@@ -124,11 +158,13 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
     y_val_t   = torch.FloatTensor(y_val_scaled)
     X_test_t  = torch.FloatTensor(X_test_scaled)
 
-    train_dataset = TensorDataset(X_train_t, y_train_t)
-    train_loader  = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(
+        TensorDataset(X_train_t, y_train_t),
+        batch_size=batch_size, shuffle=True
+    )
 
     input_dim = seq_len * X_train_scaled.shape[-1]
-    model = TemporalKANForecaster(
+    model     = TemporalKANForecaster(
         input_dim, hidden_dims=[256, 128],
         output_dim=len(assets), grid_size=20, seq_len=seq_len
     )
@@ -148,12 +184,11 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
     for epoch in range(epochs):
         model.train()
         total_loss = total_var_bonus = 0.0
-
         for batch_X, batch_y in train_loader:
             optimizer.zero_grad()
             pred      = model(batch_X)
             mse_loss  = loss_fn(pred, batch_y)
-            var_bonus = -0.5 * pred.var()
+            var_bonus = -0.1 * pred.var()
             loss      = mse_loss + var_bonus
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -161,31 +196,23 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
             total_loss      += mse_loss.item()
             total_var_bonus += var_bonus.item()
 
-        avg_train_loss = total_loss      / len(train_loader)
+        avg_train_loss = total_loss / len(train_loader)
         avg_var_bonus  = total_var_bonus / len(train_loader)
 
         model.eval()
         with torch.no_grad():
-            val_pred = model(X_val_t)
-            val_loss = loss_fn(val_pred, y_val_t).item()
-            pred_var = val_pred.var().item()
-
+            val_pred  = model(X_val_t)
+            val_loss  = loss_fn(val_pred, y_val_t).item()
+            pred_var  = val_pred.var().item()
         scheduler.step()
 
         if (epoch + 1) % 20 == 0:
-            print(
-                f"Epoch {epoch+1:3d}/{epochs} | "
-                f"Train Loss: {avg_train_loss:.6f} | "
-                f"Var Bonus: {avg_var_bonus:.6f} | "
-                f"Val Loss: {val_loss:.6f} | "
-                f"Pred Var: {pred_var:.6f} | "
-                f"LR: {optimizer.param_groups[0]['lr']:.2e}"
-            )
+            print(f"Epoch {epoch+1:3d}/{epochs} | Train: {avg_train_loss:.6f} | "
+                  f"VarBonus: {avg_var_bonus:.6f} | Val: {val_loss:.6f} | "
+                  f"PredVar: {pred_var:.6f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
 
         if val_loss < best_val_loss:
-            best_val_loss     = val_loss
-            best_epoch        = epoch
-            epochs_no_improve = 0
+            best_val_loss, best_epoch, epochs_no_improve = val_loss, epoch, 0
             os.makedirs('models', exist_ok=True)
             torch.save(model.state_dict(), f"models/kan_{module}_full.pt")
         else:
@@ -201,11 +228,9 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
     model.load_state_dict(torch.load(f"models/kan_{module}_full.pt"))
     model.eval()
     with torch.no_grad():
-        test_pred_scaled = model(X_test_t).numpy()
+        test_pred = scaler_y.inverse_transform(model(X_test_t).numpy())
 
-    test_pred    = scaler_y.inverse_transform(test_pred_scaled)
-    final_pred_var = np.var(test_pred)
-
+    final_pred_var = float(np.var(test_pred))
     print(f"\nFinal test prediction variance: {final_pred_var:.6f}")
     print(f"Test prediction mean: {test_pred.mean():.6f}, std: {test_pred.std():.6f}")
 
@@ -216,35 +241,35 @@ def train_full(module, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience
         'target_names':     target_names,
         'best_val_loss':    float(best_val_loss),
         'best_epoch':       best_epoch,
-        'final_pred_var':   float(final_pred_var),
+        'final_pred_var':   final_pred_var,
     }
     joblib.dump(results, f'metrics_{module}_full.pkl')
     print(f"Full model for {module} done. Best val loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
 
 
-def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, lr=5e-3, patience=80):
+def train_shrinking(module, start_year, epochs=300, seq_len=20,
+                     batch_size=512, lr=5e-3, patience=80):
     print(f"Shrinking window start={start_year} for {module}...")
-    df           = load_raw_data()
-    current_year = pd.Timestamp.now().year
-    df           = df[df.index >= f'{start_year}-01-01']
-    df           = df[df.index <= f'{current_year}-12-31']
-    assets       = FI_ASSETS if module == 'fi' else EQUITY_ASSETS
+    df = load_raw_data()
 
+    current_year = pd.Timestamp.now().year
+    df = df[(df.index >= f'{start_year}-01-01') &
+            (df.index <= f'{current_year}-12-31')]
+
+    assets = FI_ASSETS if module == 'fi' else EQUITY_ASSETS
     X, y, feat_names, target_names = create_features_and_targets(df, assets, seq_len)
     n = len(X)
 
     if n == 0:
         raise ValueError(
-            f"No training samples generated for {module} module starting from {start_year}. "
-            f"Dataset has {len(df)} rows after filtering. "
-            "This may indicate insufficient data for the selected time window."
+            f"No training samples for {module} starting {start_year}. "
+            f"Dataset has {len(df)} rows after filtering."
         )
     if n < 100:
         print(f" -> Not enough samples ({n}), skipping.")
         return
 
     print(f" Total samples: {n}")
-
     train_end = int(0.8 * n)
     val_end   = int(0.9 * n)
 
@@ -274,11 +299,13 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
     y_val_t   = torch.FloatTensor(y_val_scaled)
     X_test_t  = torch.FloatTensor(X_test_scaled)
 
-    train_dataset = TensorDataset(X_train_t, y_train_t)
-    train_loader  = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(
+        TensorDataset(X_train_t, y_train_t),
+        batch_size=batch_size, shuffle=True
+    )
 
     input_dim = seq_len * X_train_scaled.shape[-1]
-    model = TemporalKANForecaster(
+    model     = TemporalKANForecaster(
         input_dim, hidden_dims=[256, 128],
         output_dim=len(assets), grid_size=20, seq_len=seq_len
     )
@@ -288,19 +315,18 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     loss_fn   = nn.MSELoss()
 
-    best_val_loss     = float('inf')
-    best_epoch        = 0
+    best_val_loss    = float('inf')
+    best_epoch       = 0
     epochs_no_improve = 0
 
     for epoch in range(epochs):
         model.train()
         total_loss = total_var_bonus = 0.0
-
         for batch_X, batch_y in train_loader:
             optimizer.zero_grad()
             pred      = model(batch_X)
             mse_loss  = loss_fn(pred, batch_y)
-            var_bonus = -0.5 * pred.var()
+            var_bonus = -0.1 * pred.var()
             loss      = mse_loss + var_bonus
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -308,50 +334,45 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
             total_loss      += mse_loss.item()
             total_var_bonus += var_bonus.item()
 
-        avg_train_loss = total_loss      / len(train_loader)
+        avg_train_loss = total_loss / len(train_loader)
         avg_var_bonus  = total_var_bonus / len(train_loader)
 
         model.eval()
         with torch.no_grad():
-            val_loss = loss_fn(model(X_val_t), y_val_t).item()
-            pred_var = model(X_val_t).var().item()
-
+            val_pred = model(X_val_t)
+            val_loss = loss_fn(val_pred, y_val_t).item()
+            pred_var = val_pred.var().item()
         scheduler.step()
 
         if (epoch + 1) % 20 == 0:
-            print(
-                f"  Epoch {epoch+1:3d}/{epochs} | "
-                f"Train Loss: {avg_train_loss:.6f} | "
-                f"Var Bonus: {avg_var_bonus:.6f} | "
-                f"Val Loss: {val_loss:.6f} | "
-                f"Pred Var: {pred_var:.6f}"
-            )
+            print(f" Epoch {epoch+1:3d}/{epochs} | Train: {avg_train_loss:.6f} | "
+                  f"VarBonus: {avg_var_bonus:.6f} | Val: {val_loss:.6f} | "
+                  f"PredVar: {pred_var:.6f}")
 
         if val_loss < best_val_loss:
-            best_val_loss     = val_loss
-            best_epoch        = epoch
-            epochs_no_improve = 0
+            best_val_loss, best_epoch, epochs_no_improve = val_loss, epoch, 0
             os.makedirs('models', exist_ok=True)
-            torch.save(model.state_dict(), f"models/kan_{module}_shrinking_start{start_year}.pt")
+            torch.save(model.state_dict(),
+                       f"models/kan_{module}_shrinking_start{start_year}.pt")
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                print(f"  Early stopping at epoch {epoch+1}")
+                print(f" Early stopping at epoch {epoch+1}")
                 break
 
     os.makedirs('models', exist_ok=True)
     joblib.dump(scaler_X, f'models/scaler_X_{module}_shrinking_start{start_year}.pkl')
     joblib.dump(scaler_y, f'models/scaler_y_{module}_shrinking_start{start_year}.pkl')
 
-    model.load_state_dict(torch.load(f"models/kan_{module}_shrinking_start{start_year}.pt"))
+    model.load_state_dict(
+        torch.load(f"models/kan_{module}_shrinking_start{start_year}.pt")
+    )
     model.eval()
     with torch.no_grad():
-        test_pred_scaled = model(X_test_t).numpy()
+        test_pred = scaler_y.inverse_transform(model(X_test_t).numpy())
 
-    test_pred      = scaler_y.inverse_transform(test_pred_scaled)
-    final_pred_var = np.var(test_pred)
-
-    print(f"\n  Final test prediction variance: {final_pred_var:.6f}")
+    final_pred_var = float(np.var(test_pred))
+    print(f"\n Final test prediction variance: {final_pred_var:.6f}")
 
     results = {
         'start_year':       start_year,
@@ -361,10 +382,10 @@ def train_shrinking(module, start_year, epochs=300, seq_len=20, batch_size=512, 
         'target_names':     target_names,
         'best_val_loss':    float(best_val_loss),
         'best_epoch':       best_epoch,
-        'final_pred_var':   float(final_pred_var),
+        'final_pred_var':   final_pred_var,
     }
     joblib.dump(results, f'metrics_{module}_shrinking_start{start_year}.pkl')
-    print(f"  -> Done. Best val loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
+    print(f" -> Done. Best val loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
 
 
 if __name__ == '__main__':
@@ -380,13 +401,19 @@ if __name__ == '__main__':
 
     if args.mode == 'full':
         train_full(
-            args.module, epochs=args.epochs,
-            batch_size=args.batch_size, lr=args.lr, patience=args.patience
+            args.module,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            patience=args.patience,
         )
     else:
         if not args.start_year:
             raise ValueError("--start-year required for shrinking mode")
         train_shrinking(
-            args.module, args.start_year, epochs=args.epochs,
-            batch_size=args.batch_size, lr=args.lr, patience=args.patience
+            args.module, args.start_year,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            patience=args.patience,
         )
