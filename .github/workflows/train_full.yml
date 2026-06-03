@@ -1,5 +1,4 @@
 name: Train Full Dataset (2008–2026 YTD)
-
 on:
   push:
     branches: [ main ]
@@ -7,7 +6,6 @@ on:
       - '*.py'
       - 'requirements.txt'
   workflow_dispatch:
-
 jobs:
   train-full:
     runs-on: ubuntu-latest
@@ -29,19 +27,22 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Train FI module
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # FIX: token required for authenticated HF download
         run: python train.py --mode full --module fi --epochs 150
 
       - name: Train Equity module
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # FIX: token required for authenticated HF download
         run: python train.py --mode full --module equity --epochs 150
 
       - name: Upload all models to HF dataset repo
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python upload_all_models.py
-        # No continue-on-error — a failed upload should be visible as a red step
 
       - name: Upload artifacts to GitHub (backup)
-        if: always()   # save artifacts even if HF upload failed
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trained-models-full
