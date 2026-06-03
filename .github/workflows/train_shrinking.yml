@@ -1,8 +1,6 @@
 name: Train Shrinking Windows (2008–2024 start years)
-
 on:
-  workflow_dispatch:   # manual trigger only
-
+  workflow_dispatch:
 jobs:
   train-shrinking:
     runs-on: ubuntu-latest
@@ -19,7 +17,7 @@ jobs:
 
       - name: Train all shrinking windows (fi + equity, all start years)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # FIX: token required for authenticated HF download
         run: |
           for module in fi equity; do
             for year in 2008 2009 2010 2011 2012 2013 2014 2015 2016 2017 2018 2019 2020 2021 2022 2023 2024; do
@@ -32,10 +30,9 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python upload_all_shrinking.py
-        # No continue-on-error — a failed upload should be visible as a red step
 
       - name: Upload artifacts to GitHub (backup)
-        if: always()   # save artifacts even if HF upload failed
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shrinking-models
