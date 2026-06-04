@@ -154,6 +154,7 @@ def build_feature_sequence(df, module):
 
 def download_file(filename, subfolder="", max_retries=3):
     os.makedirs("models", exist_ok=True)
+    token = get_hf_token()   # always re-fetch token — avoid stale None at module load
     for attempt in range(max_retries):
         try:
             if subfolder:
@@ -161,13 +162,14 @@ def download_file(filename, subfolder="", max_retries=3):
                     return hf_hub_download(
                         repo_id=HF_REPO, filename=filename, subfolder=subfolder,
                         repo_type="model", local_dir="models",
-                        local_dir_use_symlinks=False, token=HF_TOKEN)
-                except:
-                    pass
+                        local_dir_use_symlinks=False, token=token)
+                except Exception as sub_e:
+                    if any(c in str(sub_e) for c in ("401","403","404")) or                        "not found" in str(sub_e).lower():
+                        return None   # genuinely missing — don't retry subfolder
             return hf_hub_download(
                 repo_id=HF_REPO, filename=filename,
                 repo_type="model", local_dir="models",
-                local_dir_use_symlinks=False, token=HF_TOKEN)
+                local_dir_use_symlinks=False, token=token)
         except Exception as e:
             msg = str(e)
             if any(c in msg for c in ("401", "403", "404")) or "not found" in msg.lower():
@@ -186,12 +188,15 @@ def load_model_and_scalers(module, mode='full', start_year=None):
         if not all(paths):
             paths = [download_file(f, "shrinking_models") for f in (mf, sxf, syf)]
     else:
-        mf, sxf, syf = (f"kan_{module}_shrinking_start{start_year}.pt",
-                        f"scaler_X_{module}_shrinking_start{start_year}.pkl",
-                        f"scaler_y_{module}_shrinking_start{start_year}.pkl")
-        paths = [download_file(f, "shrinking_models") for f in (mf, sxf, syf)]
-        if not all(paths):
-            paths = [download_file(f, "") for f in (mf, sxf, syf)]
+        mf  = f"kan_{module}_shrinking_start{start_year}.pt"
+        sxf = f"scaler_X_{module}_shrinking_start{start_year}.pkl"
+        syf = f"scaler_y_{module}_shrinking_start{start_year}.pkl"
+        # Model .pt files are in shrinking_models subfolder
+        # Scaler .pkl files are at root (uploaded separately)
+        mp   = download_file(mf,  "shrinking_models") or download_file(mf,  "")
+        sxp  = download_file(sxf, "") or download_file(sxf, "shrinking_models")
+        syp  = download_file(syf, "") or download_file(syf, "shrinking_models")
+        paths = [mp, sxp, syp]
 
     if not all(paths):
         return None, None, None, None
