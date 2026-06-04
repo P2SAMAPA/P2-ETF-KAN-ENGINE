@@ -191,11 +191,11 @@ def load_model_and_scalers(module, mode='full', start_year=None):
         mf  = f"kan_{module}_shrinking_start{start_year}.pt"
         sxf = f"scaler_X_{module}_shrinking_start{start_year}.pkl"
         syf = f"scaler_y_{module}_shrinking_start{start_year}.pkl"
-        # Model .pt files are in shrinking_models subfolder
-        # Scaler .pkl files are at root (uploaded separately)
-        mp   = download_file(mf,  "shrinking_models") or download_file(mf,  "")
-        sxp  = download_file(sxf, "") or download_file(sxf, "shrinking_models")
-        syp  = download_file(syf, "") or download_file(syf, "shrinking_models")
+        # All shrinking files are in shrinking_models/ subfolder
+        # Try subfolder first, then root as fallback for each file
+        mp  = download_file(mf,  "shrinking_models") or download_file(mf,  "")
+        sxp = download_file(sxf, "shrinking_models") or download_file(sxf, "")
+        syp = download_file(syf, "shrinking_models") or download_file(syf, "")
         paths = [mp, sxp, syp]
 
     if not all(paths):
@@ -472,6 +472,16 @@ with st.sidebar:
     st.header("Debug Info")
     st.write(f"Data rows: {len(df_raw)}")
     st.write(f"Data cols: {len(df_raw.columns)}")
+    # Show HF repo file list for debugging
+    try:
+        from huggingface_hub import list_repo_files as _lrf
+        _files = list(_lrf(HF_REPO, repo_type="model", token=get_hf_token()))
+        equity_files = [f for f in _files if "equity" in f]
+        st.write(f"HF equity files ({len(equity_files)}):")
+        for f in sorted(equity_files)[:10]:
+            st.write(f"  {f}")
+    except Exception as _e:
+        st.write(f"HF list error: {_e}")
     for k in ('pred_var_full', 'pred_var_consensus'):
         if k not in st.session_state:
             st.session_state[k] = None
