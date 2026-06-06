@@ -13,7 +13,7 @@ import os
 FI_ASSETS      = ['GLD', 'TLT', 'VCIT', 'LQD', 'HYG', 'VNQ', 'SLV']
 FI_BENCHMARK   = 'AGG'
 EQUITY_ASSETS  = ['QQQ', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY',
-                  'XLP', 'XLU', 'XME', 'GDX', 'IWM']
+                  'XLP', 'XLU', 'XME', 'GDX', 'IWF', 'XSD', 'XBI', 'IWM']
 EQUITY_BENCHMARK = 'SPY'
 MACRO_COLS     = ['VIX', 'DXY', 'T10Y2Y', 'TBILL_3M', 'IG_SPREAD', 'HY_SPREAD']
 
